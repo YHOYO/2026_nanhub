@@ -17,6 +17,7 @@ export const componentLoader = new ComponentLoader();
 // Register custom components
 componentLoader.add('ApiKeysPage', './components/ApiKeysRedirect.jsx');
 componentLoader.add('MetricsDashboard', './components/MetricsDashboard.jsx');
+componentLoader.add('ImageGenerator', './components/ImageGenerator.jsx');
 
 // AdminJS configuration
 const adminOptions = {
@@ -48,6 +49,11 @@ const adminOptions = {
         name: 'Analytics',
         icon: 'BarChart',
         page: 'metrics',
+      },
+      {
+        name: 'Image Generator',
+        icon: 'Image',
+        page: 'image-generator',
       },
     ],
   },
@@ -258,6 +264,10 @@ const adminOptions = {
     'metrics': {
       component: 'MetricsDashboard',
       icon: 'BarChart',
+    },
+    'image-generator': {
+      component: 'ImageGenerator',
+      icon: 'Image',
     },
   },
 

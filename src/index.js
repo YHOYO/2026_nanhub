@@ -21,6 +21,8 @@ import {
 } from './proxy/server.js';
 import dashboardRoutes from './api/routes/dashboard.js';
 import projectsRoutes from './api/routes/projects.js';
+import nanCloudAuthRoutes from './nancloud/authRoutes.js';
+import nanCloudImageRoutes from './nancloud/routes.js';
 
 // ES Module equivalents for __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -80,6 +82,42 @@ app.use('/api/dashboard', dashboardRoutes);
 
 // Projects API routes
 app.use('/api/projects', projectsRoutes);
+
+// NaN Cloud Image Generation routes
+app.use('/api/nancloud/auth', nanCloudAuthRoutes);
+app.use('/api/nancloud/images', nanCloudImageRoutes);
+
+// NaN Cloud status endpoint (direct route to avoid conflict)
+import SessionManager from './nancloud/sessionManager.js';
+import ImageGeneration from './nancloud/model.js';
+import nanCloudConfig from './nancloud/config.js';
+
+app.get('/api/nancloud/status', async (req, res) => {
+  try {
+    const sessionStatus = SessionManager.getStatus();
+    const stats = ImageGeneration.getStats(req.projectId);
+
+    res.json({
+      success: true,
+      data: {
+        session: sessionStatus,
+        stats: {
+          total_images: stats.totalImages || 0,
+          total_size_bytes: stats.totalSizeBytes || 0,
+          avg_size_bytes: stats.avgSizeBytes || 0,
+        },
+        quota: {
+          total: nanCloudConfig.monthlyQuota,
+        },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: { code: 'STATUS_FAILED', message: 'Error al obtener el estado' },
+    });
+  }
+});
 
 // AdminJS setup (lazy load to avoid startup issues)
 let adminRouter = null;

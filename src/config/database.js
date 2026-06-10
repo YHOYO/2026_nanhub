@@ -109,6 +109,39 @@ export function initializeDatabase() {
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
     );
 
+    -- NaN Cloud Sessions table
+    CREATE TABLE IF NOT EXISTS nancloud_sessions (
+      id TEXT PRIMARY KEY,
+      session_cookie TEXT NOT NULL,
+      username TEXT,
+      email TEXT,
+      expires_at TEXT NOT NULL,
+      is_active INTEGER DEFAULT 1,
+      last_verified_at TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+
+    -- NaN Cloud Image Generations table
+    CREATE TABLE IF NOT EXISTS image_generations (
+      id TEXT PRIMARY KEY,
+      request_id TEXT,
+      project_id TEXT,
+      nan_image_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      width INTEGER,
+      height INTEGER,
+      model TEXT DEFAULT 'flux-2-klein-9b',
+      seed INTEGER,
+      size_bytes INTEGER,
+      variants INTEGER DEFAULT 1,
+      guidance REAL DEFAULT 3.5,
+      reference_image_ids TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (request_id) REFERENCES requests(id),
+      FOREIGN KEY (project_id) REFERENCES projects(id)
+    );
+
     -- Indexes for performance
     CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests(timestamp);
     CREATE INDEX IF NOT EXISTS idx_requests_project ON requests(project_id);
@@ -119,6 +152,11 @@ export function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_projects_api_key ON projects(api_key_hash);
     CREATE INDEX IF NOT EXISTS idx_project_api_keys_hash ON project_api_keys(key_hash);
     CREATE INDEX IF NOT EXISTS idx_project_api_keys_project ON project_api_keys(project_id);
+    CREATE INDEX IF NOT EXISTS idx_nancloud_sessions_active ON nancloud_sessions(is_active);
+    CREATE INDEX IF NOT EXISTS idx_nancloud_sessions_expiry ON nancloud_sessions(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_image_gen_request ON image_generations(request_id);
+    CREATE INDEX IF NOT EXISTS idx_image_gen_project ON image_generations(project_id);
+    CREATE INDEX IF NOT EXISTS idx_image_gen_nan_id ON image_generations(nan_image_id);
   `);
 
   // Migration: move existing api_key_hash from projects to project_api_keys
@@ -126,6 +164,9 @@ export function initializeDatabase() {
 
   // Migration: add new columns to metrics_daily for existing databases
   migrateMetricsDaily();
+
+  // Migration: add prompt expansion columns to image_generations
+  migrateImageGenerationsExpansion();
 
   console.log('[Database] Schema initialized successfully');
 }
@@ -288,6 +329,44 @@ function cleanupDuplicateKeys() {
     }
   } catch (error) {
     console.error('[Migration] Error cleaning duplicates:', error.message);
+  }
+}
+
+/**
+ * Migration: add prompt expansion tracking columns to image_generations table
+ * Stores original prompt, LLM-expanded prompt, model used, and token costs.
+ */
+function migrateImageGenerationsExpansion() {
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(image_generations)").all();
+    const existingColumns = tableInfo.map(col => col.name);
+
+    const newColumns = [
+      { name: 'original_prompt', definition: 'TEXT' },
+      { name: 'expanded_prompt', definition: 'TEXT' },
+      { name: 'expansion_model', definition: 'TEXT' },
+      { name: 'expansion_mode', definition: 'TEXT' },
+      { name: 'expansion_time_ms', definition: 'INTEGER' },
+      { name: 'expansion_tokens', definition: 'INTEGER DEFAULT 0' },
+    ];
+
+    let added = 0;
+    for (const col of newColumns) {
+      if (!existingColumns.includes(col.name)) {
+        db.exec(`ALTER TABLE image_generations ADD COLUMN ${col.name} ${col.definition}`);
+        added++;
+        console.log(`[Migration] Added image_generations.${col.name}`);
+      }
+    }
+
+    if (added > 0) {
+      console.log(`[Migration] Added ${added} prompt expansion columns to image_generations`);
+    } else {
+      console.log('[Migration] image_generations expansion columns already exist');
+    }
+  } catch (error) {
+    console.error('[Migration] Error migrating image_generations expansion:', error.message);
+    // Don't crash - migration failure shouldn't prevent startup
   }
 }
 
