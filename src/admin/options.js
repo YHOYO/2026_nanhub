@@ -244,6 +244,11 @@ const adminOptions = {
     },
   ],
 
+  // Dashboard as home page (replaces "Welcome on Board!")
+  dashboard: {
+    component: 'MetricsDashboard',
+  },
+
   // Custom pages
   pages: {
     'api-keys': {

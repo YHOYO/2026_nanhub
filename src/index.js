@@ -86,18 +86,37 @@ let adminRouter = null;
 
 async function setupAdmin() {
   try {
+    logger.info('Starting AdminJS initialization...');
+    
     const AdminJS = (await import('adminjs')).default;
+    logger.info('AdminJS module loaded');
+    
     const AdminJSExpress = (await import('@adminjs/express')).default;
+    logger.info('AdminJS Express module loaded');
     
     const adminOptions = (await import('./admin/options.js')).default;
+    logger.info('Admin options loaded', {
+      rootPath: adminOptions.rootPath,
+      resourcesCount: adminOptions.resources?.length,
+      pagesCount: Object.keys(adminOptions.pages || {}).length,
+      hasDashboard: !!adminOptions.dashboard,
+    });
     
     const admin = new AdminJS(adminOptions);
+    logger.info('AdminJS instance created');
+    
     adminRouter = AdminJSExpress.buildRouter(admin);
+    logger.info('AdminJS router built');
     
     app.use('/admin', adminRouter);
     logger.info('AdminJS panel initialized at /admin');
   } catch (error) {
-    logger.error('Failed to initialize AdminJS', { error: error.message });
+    logger.error('Failed to initialize AdminJS', {
+      error: error.message,
+      stack: error.stack,
+      nodeEnv: process.env.NODE_ENV,
+      cwd: process.cwd(),
+    });
     // Don't crash, just skip admin panel
   }
 }
