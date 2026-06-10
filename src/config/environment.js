@@ -52,7 +52,7 @@ const config = {
   corsOrigin: process.env.CORS_ORIGIN || '*',
 
   // Proxy
-  proxyTimeout: parseInt(process.env.PROXY_TIMEOUT || '30000', 10),
+  proxyTimeout: parseInt(process.env.PROXY_TIMEOUT || '120000', 10),
 };
 
 export default config;
