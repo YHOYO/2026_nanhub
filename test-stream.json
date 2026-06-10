@@ -1,0 +1,8 @@
+{
+  "model": "deepseek-v4-flash",
+  "messages": [
+    {"role": "user", "content": "Hola, responde en una sola linea"}
+  ],
+  "max_tokens": 20,
+  "stream": true
+}

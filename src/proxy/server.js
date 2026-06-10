@@ -1,6 +1,5 @@
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import interceptor from './interceptor.js';
-import compressor from './compressor.js';
 import config from '../config/environment.js';
 import logger from '../utils/logger.js';
 import ProjectApiKey from '../models/ProjectApiKey.js';
@@ -34,6 +33,16 @@ export function createProxy() {
     onProxyReq(proxyReq, req, res) {
       // Replace Authorization header: client's npx_ key → server's sk- key
       proxyReq.setHeader('Authorization', `Bearer ${config.nanApiKey}`);
+
+      // Re-serialize body if express.json() already consumed the stream
+      // http-proxy-middleware uses req.pipe(proxyReq) internally, but the stream
+      // is exhausted after body parsing. We must write the body manually.
+      if (req.body && Object.keys(req.body).length > 0) {
+        const bodyData = JSON.stringify(req.body);
+        proxyReq.setHeader('Content-Type', 'application/json');
+        proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+        proxyReq.write(bodyData);
+      }
 
       logger.proxy('Forwarding request', {
         method: req.method,
@@ -117,6 +126,12 @@ export function interceptMiddleware(req, res, next) {
   const requestId = interceptor.startCapture(req);
   req.requestId = requestId;
 
+  // Detect if this is a streaming request
+  const isStreaming = req.body && req.body.stream === true;
+
+  // Accumulate SSE chunks for streaming responses
+  const streamingChunks = [];
+
   // Capture original res.json and res.send to intercept response
   const originalJson = res.json.bind(res);
   const originalSend = res.send.bind(res);
@@ -158,16 +173,38 @@ export function interceptMiddleware(req, res, next) {
     return originalSend(data);
   };
 
+  // For streaming: intercept res.write to accumulate SSE chunks
+  if (isStreaming) {
+    const originalWrite = res.write.bind(res);
+    res.write = function(chunk, ...rest) {
+      if (!responseCaptured) {
+        try {
+          const str = typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+          streamingChunks.push(str);
+        } catch (e) {
+          // Ignore chunk parsing errors
+        }
+      }
+      return originalWrite(chunk, ...rest);
+    };
+  }
+
   // Handle stream completion
   const originalEnd = res.end.bind(res);
   res.end = function(...args) {
     if (!responseCaptured) {
       responseCaptured = true;
-      interceptor.completeCapture(requestId, {
-        status: res.statusCode,
-        body: null,
-        error: null,
-      });
+
+      if (isStreaming && streamingChunks.length > 0) {
+        // Use handleStreamingResponse to extract tokens from SSE chunks
+        interceptor.handleStreamingResponse(requestId, streamingChunks);
+      } else {
+        interceptor.completeCapture(requestId, {
+          status: res.statusCode,
+          body: null,
+          error: null,
+        });
+      }
     }
     return originalEnd(...args);
   };
@@ -176,35 +213,7 @@ export function interceptMiddleware(req, res, next) {
 }
 
 /**
- * Compression middleware - compresses context before proxying
- * Applied to /v1/chat/completions only
- */
-export async function compressionMiddleware(req, res, next) {
-  // Only compress chat completions requests
-  if (req.method === 'POST' && req.url === '/chat/completions') {
-    try {
-      if (req.body && req.body.messages) {
-        const originalMsgCount = req.body.messages.length;
-        req.body = await compressor.compress(req.body);
-        const compressedMsgCount = req.body.messages.length;
-        
-        if (originalMsgCount !== compressedMsgCount) {
-          logger.info('Messages compressed', {
-            original: originalMsgCount,
-            compressed: compressedMsgCount,
-            phase: compressor.getPhase(),
-          });
-        }
-      }
-    } catch (error) {
-      logger.error('Compression error, passing through', { error: error.message });
-      // Don't block the request on compression errors
-    }
-  }
-  next();
-}
 
-/**
  * Health check endpoint
  */
 export function healthCheck(req, res) {
@@ -213,25 +222,20 @@ export function healthCheck(req, res) {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     pendingRequests: interceptor.getPendingCount(),
-    phase: compressor.getPhase(),
   });
 }
 
 /**
- * Stats endpoint - proxy metrics and compression stats
+ * Stats endpoint - proxy metrics
  */
 export function statsEndpoint(req, res) {
   try {
-    const compressionStats = compressor.getStats();
-    
     res.json({
       status: 'ok',
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       pendingRequests: interceptor.getPendingCount(),
-      compression: compressionStats,
       config: {
-        phase: config.phase,
         target: config.nanApiBaseUrl,
         port: config.port,
       },
@@ -298,80 +302,61 @@ export async function embeddingsPassthrough(req, res) {
 }
 
 /**
- * POST /v1/index/upload - Upload files for RAG indexing
+ * POST /v1/chat/completions - passthrough to NaN API (with streaming support)
  */
-export function indexUpload(req, res) {
+export async function chatCompletionsPassthrough(req, res) {
   try {
-    const { filePath, content, metadata } = req.body;
+    const isStreaming = req.body?.stream === true;
 
-    if (!filePath || !content) {
-      return res.status(400).json({
-        error: {
-          message: 'filePath and content are required',
-          type: 'validation_error',
-          code: 'MISSING_FIELDS',
-        },
-      });
+    const response = await fetch(`${config.nanApiBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${config.nanApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(req.body),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return res.status(response.status).json(errorData);
     }
 
-    compressor.addFileToIndex(filePath, content, metadata);
+    if (isStreaming) {
+      // Stream SSE response back to client
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
 
-    res.json({
-      success: true,
-      message: `File indexed: ${filePath}`,
-      indexStatus: compressor.getIndexStatus(),
-    });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          res.write(chunk);
+        }
+      } catch (streamError) {
+        logger.error('Stream error', { error: streamError.message });
+      }
+
+      res.end();
+    } else {
+      // Non-streaming: return full JSON response
+      const data = await response.json();
+      res.status(response.status).json(data);
+    }
   } catch (error) {
-    logger.error('Index upload error', { error: error.message });
-    res.status(500).json({
+    logger.error('Chat completions passthrough error', { error: error.message });
+    res.status(502).json({
       error: {
-        message: 'Failed to index file',
-        type: 'internal_error',
-        code: 'INDEX_ERROR',
+        message: 'Failed to forward chat completion to NaN API',
+        type: 'proxy_error',
+        code: 'PROXY_ERROR',
       },
     });
   }
 }
 
-/**
- * GET /v1/index/status - Get RAG index status
- */
-export function indexStatus(req, res) {
-  try {
-    const status = compressor.getIndexStatus();
-    res.json(status);
-  } catch (error) {
-    logger.error('Index status error', { error: error.message });
-    res.status(500).json({ error: 'Failed to get index status' });
-  }
-}
-
-/**
- * POST /v1/index/search - Search the RAG index
- */
-export function indexSearch(req, res) {
-  try {
-    const { query, maxResults } = req.body;
-
-    if (!query) {
-      return res.status(400).json({
-        error: {
-          message: 'query is required',
-          type: 'validation_error',
-          code: 'MISSING_FIELDS',
-        },
-      });
-    }
-
-    const results = compressor.searchIndex(query, maxResults || 5);
-
-    res.json({
-      query,
-      results,
-      totalResults: results.length,
-    });
-  } catch (error) {
-    logger.error('Index search error', { error: error.message });
-    res.status(500).json({ error: 'Failed to search index' });
-  }
-}

@@ -105,6 +105,24 @@ class RequestInterceptor {
       errorMessage: responseData.error || null,
     });
 
+    // Update daily metrics in real-time
+    try {
+      Metric.upsert({
+        date: new Date().toISOString().split('T')[0],
+        projectId: captureData.projectId,
+        model: model || 'unknown',
+        endpoint: captureData.endpoint,
+        totalRequests: 1,
+        totalTokens: tokensTotal,
+        tokensPrompt,
+        tokensCompletion,
+        avgResponseTimeMs: responseTimeMs,
+        errorRate: responseData.status >= 400 ? 100 : 0,
+      });
+    } catch (metricError) {
+      logger.error('Failed to upsert metric', { error: metricError.message });
+    }
+
     // Clean up
     this.pendingRequests.delete(requestId);
 
@@ -176,6 +194,24 @@ class RequestInterceptor {
       model,
       errorMessage: null,
     });
+
+    // Update daily metrics in real-time
+    try {
+      Metric.upsert({
+        date: new Date().toISOString().split('T')[0],
+        projectId: captureData.projectId,
+        model: model || 'unknown',
+        endpoint: captureData.endpoint,
+        totalRequests: 1,
+        totalTokens: tokensTotal,
+        tokensPrompt,
+        tokensCompletion,
+        avgResponseTimeMs: responseTimeMs,
+        errorRate: 0, // Streaming responses are typically successful
+      });
+    } catch (metricError) {
+      logger.error('Failed to upsert streaming metric', { error: metricError.message });
+    }
 
     // Clean up
     this.pendingRequests.delete(requestId);

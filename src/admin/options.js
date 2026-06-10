@@ -16,6 +16,7 @@ export const componentLoader = new ComponentLoader();
 
 // Register custom components
 componentLoader.add('ApiKeysPage', './components/ApiKeysRedirect.jsx');
+componentLoader.add('MetricsDashboard', './components/MetricsDashboard.jsx');
 
 // AdminJS configuration
 const adminOptions = {
@@ -46,7 +47,7 @@ const adminOptions = {
       {
         name: 'Analytics',
         icon: 'BarChart',
-        resources: ['metrics'],
+        page: 'metrics',
       },
     ],
   },
@@ -248,6 +249,10 @@ const adminOptions = {
     'api-keys': {
       component: 'ApiKeysPage',
       icon: 'Key',
+    },
+    'metrics': {
+      component: 'MetricsDashboard',
+      icon: 'BarChart',
     },
   },
 

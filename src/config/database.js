@@ -63,18 +63,21 @@ export function initializeDatabase() {
       FOREIGN KEY (project_id) REFERENCES projects(id)
     );
 
-    -- Daily metrics table (aggregated)
+    -- Daily metrics table (aggregated by date + project + model + endpoint)
     CREATE TABLE IF NOT EXISTS metrics_daily (
       id TEXT PRIMARY KEY,
       date TEXT NOT NULL,
       project_id TEXT,
       model TEXT,
+      endpoint TEXT DEFAULT 'unknown',
       total_requests INTEGER DEFAULT 0,
       total_tokens INTEGER DEFAULT 0,
+      tokens_prompt INTEGER DEFAULT 0,
+      tokens_completion INTEGER DEFAULT 0,
       avg_response_time_ms REAL DEFAULT 0,
       error_rate REAL DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')),
-      UNIQUE(date, project_id, model),
+      UNIQUE(date, project_id, model, endpoint),
       FOREIGN KEY (project_id) REFERENCES projects(id)
     );
 
@@ -120,6 +123,9 @@ export function initializeDatabase() {
 
   // Migration: move existing api_key_hash from projects to project_api_keys
   migrateProjectApiKeys();
+
+  // Migration: add new columns to metrics_daily for existing databases
+  migrateMetricsDaily();
 
   console.log('[Database] Schema initialized successfully');
 }
@@ -186,6 +192,74 @@ function migrateProjectApiKeys() {
     }
   } catch (error) {
     console.error('[Migration] Error migrating API keys:', error.message);
+    // Don't crash - migration failure shouldn't prevent startup
+  }
+}
+
+/**
+ * Migrate metrics_daily table: add tokens_prompt, tokens_completion, endpoint columns
+ * for databases created before the dashboard metrics enhancement.
+ */
+function migrateMetricsDaily() {
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(metrics_daily)").all();
+    const existingColumns = tableInfo.map(col => col.name);
+
+    // Check if the UNIQUE constraint includes 'endpoint'
+    // If not, we need to recreate the table (SQLite doesn't support ALTER CONSTRAINT)
+    const constraints = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='metrics_daily'").get();
+    const hasEndpointUnique = constraints && constraints.sql && constraints.sql.includes('UNIQUE(date, project_id, model, endpoint)');
+
+    if (!hasEndpointUnique) {
+      // Recreate the table with the correct UNIQUE constraint
+      const rowCount = db.prepare("SELECT COUNT(*) as cnt FROM metrics_daily").get();
+      console.log(`[Migration] Recreating metrics_daily table (current rows: ${rowCount.cnt})`);
+
+      // Save existing data if any
+      const existingData = db.prepare("SELECT * FROM metrics_daily").all();
+
+      db.exec("DROP TABLE IF EXISTS metrics_daily");
+      db.exec(`
+        CREATE TABLE metrics_daily (
+          id TEXT PRIMARY KEY,
+          date TEXT NOT NULL,
+          project_id TEXT,
+          model TEXT,
+          endpoint TEXT DEFAULT 'unknown',
+          total_requests INTEGER DEFAULT 0,
+          total_tokens INTEGER DEFAULT 0,
+          tokens_prompt INTEGER DEFAULT 0,
+          tokens_completion INTEGER DEFAULT 0,
+          avg_response_time_ms REAL DEFAULT 0,
+          error_rate REAL DEFAULT 0,
+          created_at TEXT DEFAULT (datetime('now')),
+          UNIQUE(date, project_id, model, endpoint),
+          FOREIGN KEY (project_id) REFERENCES projects(id)
+        )
+      `);
+
+      // Restore data if there was any
+      if (existingData.length > 0) {
+        const insert = db.prepare(`
+          INSERT OR IGNORE INTO metrics_daily
+            (id, date, project_id, model, endpoint, total_requests, total_tokens, tokens_prompt, tokens_completion, avg_response_time_ms, error_rate, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        for (const row of existingData) {
+          insert.run(row.id, row.date, row.project_id, row.model, row.endpoint || 'unknown', row.total_requests, row.total_tokens, row.tokens_prompt || 0, row.tokens_completion || 0, row.avg_response_time_ms, row.error_rate, row.created_at);
+        }
+        console.log(`[Migration] Restored ${existingData.length} rows to metrics_daily`);
+      }
+
+      console.log('[Migration] Recreated metrics_daily with correct UNIQUE constraint');
+    }
+
+    // Create new indexes if they don't exist
+    db.exec("CREATE INDEX IF NOT EXISTS idx_metrics_daily_model ON metrics_daily(model)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_metrics_daily_endpoint ON metrics_daily(endpoint)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_requests_endpoint ON requests(endpoint)");
+  } catch (error) {
+    console.error('[Migration] Error migrating metrics_daily:', error.message);
     // Don't crash - migration failure shouldn't prevent startup
   }
 }

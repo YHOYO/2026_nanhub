@@ -193,4 +193,298 @@ router.get('/projects', (req, res) => {
   }
 });
 
+/**
+ * GET /api/dashboard/super/apikeys
+ * Get all API keys with usage stats
+ * Query params: period, projectId
+ */
+router.get('/super/apikeys', (req, res) => {
+  try {
+    const { period, projectId } = req.query;
+
+    const now = new Date();
+    const endDate = now.toISOString().split('T')[0];
+    const endDateTime = endDate + ' 23:59:59';
+
+    let start;
+    switch (period) {
+      case '1d':
+        start = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '30d':
+        start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '90d':
+        start = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case 'all':
+        start = '2000-01-01';
+        break;
+      case '7d':
+      default:
+        start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+    }
+
+    const apiKeys = Request.getByApiKeyHash({
+      projectId,
+      startDate: start,
+      endDate: endDateTime,
+    });
+
+    res.json({
+      data: apiKeys,
+      period: { start, end: endDate },
+    });
+  } catch (error) {
+    logger.error('Failed to get API keys usage', { error: error.message });
+    res.status(500).json({ error: 'Failed to get API keys usage' });
+  }
+});
+
+/**
+ * GET /api/dashboard/super/model/:model
+ * Get detailed stats for a specific model
+ * Query params: period, projectId
+ */
+router.get('/super/model/:model', (req, res) => {
+  try {
+    const { model } = req.params;
+    const { period, projectId } = req.query;
+
+    const now = new Date();
+    const endDate = now.toISOString().split('T')[0];
+    const endDateTime = endDate + ' 23:59:59';
+
+    let start;
+    switch (period) {
+      case '1d':
+        start = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '30d':
+        start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '90d':
+        start = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case 'all':
+        start = '2000-01-01';
+        break;
+      case '7d':
+      default:
+        start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+    }
+
+    // Try metrics_daily first, fallback to requests table
+    const dailyTrend = Metric.getModelDailyTrend(model, start, endDate, { projectId });
+    const byProject = Metric.getModelByProject(model, start, endDate, { projectId });
+
+    // Get summary and byApiKey from requests table (more complete data)
+    const requestDetail = Request.getModelDetail(model, {
+      projectId,
+      startDate: start,
+      endDate: endDateTime,
+    });
+
+    res.json({
+      summary: requestDetail.summary,
+      dailyTrend: dailyTrend.length > 0 ? dailyTrend : requestDetail.dailyTrend,
+      byProject: byProject.length > 0 ? byProject : requestDetail.byProject,
+      byApiKey: requestDetail.byApiKey,
+      model,
+      period: { start, end: endDate, label: period || '7d' },
+    });
+  } catch (error) {
+    logger.error('Failed to get model detail', { error: error.message });
+    res.status(500).json({ error: 'Failed to get model detail' });
+  }
+});
+
+/**
+ * GET /api/dashboard/super/apikey/:apiKeyHash/detail
+ * Get detailed stats for a specific API key
+ * Query params: period
+ */
+router.get('/super/apikey/:apiKeyHash/detail', (req, res) => {
+  try {
+    const { apiKeyHash } = req.params;
+    const { period } = req.query;
+
+    const now = new Date();
+    const endDate = now.toISOString().split('T')[0];
+    const endDateTime = endDate + ' 23:59:59';
+
+    let start;
+    switch (period) {
+      case '1d':
+        start = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '30d':
+        start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '90d':
+        start = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case 'all':
+        start = '2000-01-01';
+        break;
+      case '7d':
+      default:
+        start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+    }
+
+    const detail = Request.getApiKeyDetail(apiKeyHash, {
+      startDate: start,
+      endDate: endDateTime,
+    });
+
+    res.json({
+      ...detail,
+      period: { start, end: endDate, label: period || '7d' },
+    });
+  } catch (error) {
+    logger.error('Failed to get API key detail', { error: error.message });
+    res.status(500).json({ error: 'Failed to get API key detail' });
+  }
+});
+
+/**
+ * GET /api/dashboard/super
+ * Full dashboard data: summary + byProject + byModel + byEndpoint + dailyTrend + byApiKey
+ * Query params: period (7d|30d|90d|all), projectId
+ */
+router.get('/super', (req, res) => {
+  try {
+    const { period, projectId } = req.query;
+
+    // Calculate date range based on period
+    const now = new Date();
+    const endDate = now.toISOString().split('T')[0];
+    // Use full datetime for requests table queries (timestamps include time)
+    const endDateTime = endDate + ' 23:59:59';
+
+    let start;
+    switch (period) {
+      case '1d':
+        start = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '30d':
+        start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '90d':
+        start = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case 'all':
+        start = '2000-01-01';
+        break;
+      case '7d':
+      default:
+        start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+    }
+
+    const filters = {};
+    if (projectId) {
+      filters.projectId = projectId;
+    }
+
+    // Get full dashboard data from metrics_daily (uses date-only strings)
+    const dashboardData = Metric.getFullDashboard(start, endDate, filters);
+
+    // Supplement with data from requests table if metrics_daily is empty
+    if (dashboardData.summary.totalRequests === 0) {
+      const requestStats = Request.getStats({ projectId, startDate: start, endDate: endDateTime });
+      if (requestStats.totalRequests > 0) {
+        dashboardData.summary = {
+          totalRequests: requestStats.totalRequests || 0,
+          totalTokens: requestStats.totalTokens || 0,
+          totalPrompt: 0, // Not available from old requests without metrics_daily
+          totalCompletion: 0,
+          avgResponseTime: Math.round(requestStats.avgResponseTime || 0),
+          errorRate: Math.round((requestStats.errorRate || 0) * 100) / 100,
+        };
+
+        // Get by model from requests
+        dashboardData.byModel = Request.getByModel({ projectId, startDate: start, endDate: endDateTime }).map(m => ({
+          model: m.model || 'unknown',
+          totalRequests: m.requests,
+          totalTokens: m.tokens,
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          avgResponseTime: Math.round(m.avgResponseTime || 0),
+          errorRate: 0,
+        }));
+
+        // Get hourly consumption as daily trend fallback
+        const hourlyData = Request.getHourlyConsumption({ projectId, startDate: start, endDate: endDateTime });
+        // Aggregate hourly into daily
+        const dailyMap = {};
+        for (const h of hourlyData) {
+          const day = h.hour ? h.hour.split(' ')[0] : h.hour;
+          if (!dailyMap[day]) {
+            dailyMap[day] = { date: day, requests: 0, tokens: 0, tokensPrompt: 0, tokensCompletion: 0 };
+          }
+          dailyMap[day].requests += h.requests || 0;
+          dailyMap[day].tokens += h.tokens || 0;
+        }
+        dashboardData.dailyTrend = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
+
+        // Get by project from requests
+        const projects = Project.findAll();
+        dashboardData.byProject = projects.map(p => {
+          const stats = Project.getStats(p.id);
+          return {
+            projectId: p.id,
+            projectName: p.name,
+            totalRequests: stats.totalRequests || 0,
+            totalTokens: stats.totalTokens || 0,
+            tokensPrompt: 0,
+            tokensCompletion: 0,
+            avgResponseTime: Math.round(stats.avgResponseTime || 0),
+            errorRate: 0,
+          };
+        }).filter(p => p.totalRequests > 0);
+
+        // By endpoint from requests
+        dashboardData.byEndpoint = Request.getByEndpoint({ projectId, startDate: start, endDate: endDateTime }).map(e => ({
+          endpoint: e.endpoint || 'unknown',
+          totalRequests: e.requests,
+          totalTokens: e.tokens,
+          tokensPrompt: 0,
+          tokensCompletion: 0,
+          avgResponseTime: Math.round(e.avgResponseTime || 0),
+          errorRate: 0,
+        }));
+      }
+    }
+
+    // Get API keys usage
+    const byApiKey = Request.getByApiKeyHash({
+      projectId,
+      startDate: start,
+      endDate: endDateTime,
+    });
+
+    // Get total counts for summary cards
+    const totalProjects = Project.findAll().length;
+    const uniqueModels = dashboardData.byModel.length;
+
+    res.json({
+      ...dashboardData,
+      byApiKey,
+      summary: {
+        ...dashboardData.summary,
+        totalProjects,
+        totalModels: uniqueModels,
+      },
+      period: { start, end: endDate, label: period || '7d' },
+    });
+  } catch (error) {
+    logger.error('Failed to get super dashboard data', { error: error.message, stack: error.stack });
+    res.status(500).json({ error: 'Failed to get dashboard data' });
+  }
+});
+
 export default router;

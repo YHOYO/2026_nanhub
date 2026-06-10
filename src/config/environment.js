@@ -29,9 +29,6 @@ const config = {
   nanApiBaseUrl: process.env.NAN_BASE_URL || 'https://api.nan.builders/v1',
   nanApiKey: process.env.NAN_API_KEY || '',
 
-  // Context Compression Phase (0-5)
-  phase: parseInt(process.env.PHASE || '0', 10),
-
   // Database
   databasePath: process.env.DATABASE_PATH || '/data/nanproxy.db',
 

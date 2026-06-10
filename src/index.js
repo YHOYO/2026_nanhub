@@ -13,14 +13,11 @@ import {
   createProxy,
   authMiddleware,
   interceptMiddleware,
-  compressionMiddleware,
   healthCheck,
   statsEndpoint,
   modelsPassthrough,
   embeddingsPassthrough,
-  indexUpload,
-  indexStatus,
-  indexSearch,
+  chatCompletionsPassthrough,
 } from './proxy/server.js';
 import dashboardRoutes from './api/routes/dashboard.js';
 import projectsRoutes from './api/routes/projects.js';
@@ -137,17 +134,8 @@ app.get('/v1/models', modelsPassthrough);
 // POST /v1/embeddings - passthrough to NaN API
 app.post('/v1/embeddings', embeddingsPassthrough);
 
-// POST /v1/index/upload - upload files for RAG indexing
-app.post('/v1/index/upload', indexUpload);
-
-// GET /v1/index/status - get RAG index status
-app.get('/v1/index/status', indexStatus);
-
-// POST /v1/index/search - search the RAG index
-app.post('/v1/index/search', indexSearch);
-
-// === Compression middleware for chat completions ===
-app.use('/v1', compressionMiddleware);
+// POST /v1/chat/completions - passthrough to NaN API (with streaming support)
+app.post('/v1/chat/completions', chatCompletionsPassthrough);
 
 // Proxy middleware for NaN API routes (catch-all for /v1/*)
 app.use('/v1', createProxy());

@@ -1,0 +1,7 @@
+{
+  "model": "mimo-v2.5",
+  "messages": [
+    {"role": "user", "content": "Hola, responde en una sola linea"}
+  ],
+  "max_tokens": 50
+}
