@@ -49,3 +49,10 @@ temp/
 # Internal documentation
 plans/
 ref/
+
+# AdminJS generated files
+.adminjs/
+
+# Internal documentation
+plans/
+ref/

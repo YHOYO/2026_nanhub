@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import Request from '../models/Request.js';
 import Metric from '../models/Metric.js';
 import logger from '../utils/logger.js';
