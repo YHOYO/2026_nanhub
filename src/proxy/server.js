@@ -30,8 +30,11 @@ export function createProxy() {
       }
     },
 
-    // Log proxy events
+    // Replace client API key with server API key before forwarding
     onProxyReq(proxyReq, req, res) {
+      // Replace Authorization header: client's npx_ key → server's sk- key
+      proxyReq.setHeader('Authorization', `Bearer ${config.nanApiKey}`);
+
       logger.proxy('Forwarding request', {
         method: req.method,
         url: req.url,
