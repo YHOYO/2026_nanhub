@@ -344,6 +344,10 @@ router.post('/generate', async (req, res) => {
         code: 'GENERATION_FAILED',
         message: 'Error al generar las imágenes',
         details: error.message,
+        status: error.status,
+        body: error.body?.substring(0, 500),
+        api_base: nanCloudConfig.apiBase,
+        session_source: sessionStatus.source || 'unknown',
       },
     });
   }
@@ -647,6 +651,83 @@ router.get('/expansion-status', async (req, res) => {
       },
     });
   }
+});
+
+/**
+ * GET /api/nancloud/images/diagnose
+ * Diagnostic endpoint - tests connectivity to NaN Cloud API
+ */
+router.get('/diagnose', async (req, res) => {
+  const results = {
+    timestamp: new Date().toISOString(),
+    env_cookie: !!process.env.NAN_CLOUD_SESSION_COOKIE,
+    env_cookie_length: process.env.NAN_CLOUD_SESSION_COOKIE?.length || 0,
+    config_cookie: !!nanCloudConfig.sessionCookie,
+    config_cookie_length: nanCloudConfig.sessionCookie?.length || 0,
+    api_base: nanCloudConfig.apiBase,
+    session_status: SessionManager.getStatus(),
+    tests: {},
+  };
+
+  // Test 1: Can we reach NaN Cloud API at all?
+  try {
+    const sessionCookie = SessionManager.getSessionCookie();
+    const testRes = await fetch(nanCloudConfig.apiBase + '/api/images?limit=1&offset=0', {
+      method: 'GET',
+      headers: {
+        'Cookie': `nan_session=${sessionCookie}`,
+        'Origin': 'https://cloud.nan.builders',
+        'Referer': 'https://cloud.nan.builders/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    const testBody = await testRes.text();
+    results.tests.nancloud_api = {
+      status: testRes.status,
+      ok: testRes.ok,
+      contentType: testRes.headers.get('content-type'),
+      bodyPreview: testBody.substring(0, 300),
+    };
+  } catch (error) {
+    results.tests.nancloud_api = {
+      error: error.message,
+      type: error.name,
+      code: error.cause?.code,
+    };
+  }
+
+  // Test 2: Can we reach the LLM endpoint?
+  try {
+    const envConfig = await import('../config/environment.js').then(m => m.default);
+    const llmRes = await fetch(envConfig.nanApiBaseUrl + '/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${envConfig.nanApiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'qwen3.6',
+        messages: [{ role: 'user', content: 'Say OK' }],
+        max_tokens: 5,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const llmBody = await llmRes.text();
+    results.tests.llm_api = {
+      status: llmRes.status,
+      ok: llmRes.ok,
+      bodyPreview: llmBody.substring(0, 300),
+    };
+  } catch (error) {
+    results.tests.llm_api = {
+      error: error.message,
+      type: error.name,
+      code: error.cause?.code,
+    };
+  }
+
+  res.json(results);
 });
 
 export default router;
