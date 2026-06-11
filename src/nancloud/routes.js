@@ -69,8 +69,24 @@ router.post('/generate', async (req, res) => {
       ? reference_images.slice(0, nanCloudConfig.maxReferenceImages)
       : [];
 
-    // Check if NaN Cloud session is valid
-    const sessionStatus = SessionManager.getStatus();
+    // Check if NaN Cloud session is valid (check DB first, then ENV variable)
+    let sessionStatus = SessionManager.getStatus();
+    if (!sessionStatus.has_session || sessionStatus.is_expired) {
+      // Fallback: check ENV variable directly (for containerized deployments)
+      if (process.env.NAN_CLOUD_SESSION_COOKIE) {
+        const jwtData = SessionManager.parseJWT(process.env.NAN_CLOUD_SESSION_COOKIE);
+        if (jwtData && new Date(jwtData.expiresAt) > new Date()) {
+          sessionStatus = {
+            has_session: true,
+            is_expired: false,
+            username: jwtData.username,
+            email: jwtData.email,
+            expires_at: jwtData.expiresAt,
+            source: 'env',
+          };
+        }
+      }
+    }
     if (!sessionStatus.has_session || sessionStatus.is_expired) {
       return res.status(503).json({
         success: false,

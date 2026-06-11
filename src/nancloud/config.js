@@ -12,8 +12,15 @@ import path from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load .env file from project root
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+// Load .env file from project root (override: false ensures platform ENV vars take precedence)
+dotenv.config({ path: path.resolve(__dirname, '../../.env'), override: false });
+
+// Log session cookie status at startup (for debugging deployments)
+if (process.env.NAN_CLOUD_SESSION_COOKIE) {
+  console.log('[Config] NAN_CLOUD_SESSION_COOKIE is set (' + process.env.NAN_CLOUD_SESSION_COOKIE.substring(0, 20) + '...)');
+} else {
+  console.log('[Config] NAN_CLOUD_SESSION_COOKIE is NOT set');
+}
 
 const nanCloudConfig = {
   // NaN Cloud API Base URL
