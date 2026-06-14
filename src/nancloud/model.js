@@ -346,6 +346,240 @@ const ImageGeneration = {
     `);
     return stmt.get();
   },
+
+  // ============================================================
+  // Remote Image Sync Methods
+  // ============================================================
+
+  /**
+   * Find existing images by a batch of NaN Cloud image IDs (for deduplication)
+   * Returns a Set of nan_image_ids that already exist in the DB
+   */
+  findByNanImageIds(nanImageIds) {
+    if (!nanImageIds || nanImageIds.length === 0) return new Set();
+
+    // SQLite has a limit on IN clause parameters; batch in groups of 500
+    const existingIds = new Set();
+    for (let i = 0; i < nanImageIds.length; i += 500) {
+      const batch = nanImageIds.slice(i, i + 500);
+      const placeholders = batch.map(() => '?').join(',');
+      const stmt = db.prepare(
+        `SELECT nan_image_id FROM ${this.tableName} WHERE nan_image_id IN (${placeholders})`
+      );
+      const rows = stmt.all(...batch);
+      for (const row of rows) {
+        existingIds.add(row.nan_image_id);
+      }
+    }
+    return existingIds;
+  },
+
+  /**
+   * Insert remote images from NaN Cloud into the local DB
+   * Uses source='remote' to distinguish from locally generated images
+   * Returns { inserted: number, skipped: number, ids: string[] }
+   */
+  insertRemoteBatch(images, projectId = null) {
+    const ids = [];
+    let skipped = 0;
+
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO ${this.tableName} (
+        id, request_id, project_id, nan_image_id, prompt,
+        width, height, model, seed, size_bytes,
+        variants, guidance, reference_image_ids,
+        original_prompt, source, nan_request_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'remote', ?)
+    `);
+
+    const insertAll = db.transaction((imgs) => {
+      for (const image of imgs) {
+        // Skip if nan_image_id already exists (INSERT OR IGNORE + pre-check)
+        const id = generateId();
+        try {
+          stmt.run(
+            id,
+            null, // request_id: NULL for remote images (no FK reference)
+            projectId || null,
+            image.id || image.nan_image_id || id,
+            image.prompt || '',
+            image.width || 1024,
+            image.height || 1024,
+            image.model || 'flux-2-klein-9b',
+            image.seed || null,
+            image.sizeBytes || image.size_bytes || null,
+            image.variants || 1,
+            image.guidance || 3.5,
+            null, // reference_image_ids
+            image.prompt || null, // original_prompt
+            image.requestId || null // nan_request_id from NaN Cloud API
+          );
+          ids.push(id);
+        } catch (err) {
+          // Duplicate nan_image_id or other constraint violation
+          skipped++;
+          console.error('[Model] insertRemoteBatch error:', err.message, {
+            nan_image_id: image.id,
+            prompt_length: (image.prompt || '').length,
+          });
+        }
+      }
+    });
+
+    insertAll(images);
+    return { inserted: ids.length, skipped, ids };
+  },
+
+  /**
+   * Get remote images grouped for gallery display
+   * Groups by prompt similarity + time window (5 min) for remote images
+   */
+  findRemoteGrouped(filters = {}, page = 1, limit = 20) {
+    let whereClause = "WHERE source = 'remote'";
+    const params = [];
+
+    if (filters.projectId) {
+      whereClause += ' AND project_id = ?';
+      params.push(filters.projectId);
+    }
+
+    // Group by nan_request_id (images from same NaN Cloud generation request)
+    // Images without nan_request_id are grouped by their own nan_image_id
+    const groupQuery = `
+      SELECT COALESCE(nan_request_id, nan_image_id) as group_id, MIN(created_at) as created_at, COUNT(*) as image_count
+      FROM ${this.tableName}
+      ${whereClause}
+      GROUP BY COALESCE(nan_request_id, nan_image_id)
+      ORDER BY MIN(created_at) DESC
+      LIMIT ? OFFSET ?
+    `;
+
+    const offset = (page - 1) * limit;
+    const groups = db.prepare(groupQuery).all(...params, limit, offset);
+
+    // Get total count of groups
+    const countQuery = `SELECT COUNT(DISTINCT COALESCE(nan_request_id, nan_image_id)) as total FROM ${this.tableName} ${whereClause}`;
+    const { total } = db.prepare(countQuery).get(...params);
+
+    // For each group, get all images
+    const result = [];
+    for (const group of groups) {
+      // Try to get images by nan_request_id first, fallback to nan_image_id
+      let images = [];
+      if (group.group_id && !group.group_id.startsWith('nan-')) {
+        // It's a nan_request_id (UUID format)
+        images = db.prepare(
+          `SELECT * FROM ${this.tableName} WHERE nan_request_id = ? AND source = 'remote' ORDER BY created_at ASC`
+        ).all(group.group_id);
+      }
+      if (images.length === 0) {
+        // Fallback: get by nan_image_id (for images without nan_request_id)
+        images = db.prepare(
+          `SELECT * FROM ${this.tableName} WHERE nan_image_id = ? AND source = 'remote' ORDER BY created_at ASC`
+        ).all(group.group_id);
+      }
+
+      if (images.length === 0) continue;
+
+      const first = images[0];
+
+      result.push({
+        request_id: first.nan_request_id || `remote_${first.nan_image_id}`,
+        original_prompt: first.original_prompt || first.prompt,
+        prompt: first.prompt,
+        width: first.width,
+        height: first.height,
+        model: first.model,
+        guidance: first.guidance,
+        variants: images.length,
+        source: 'remote',
+        created_at: group.created_at,
+        images: images.map(img => ({
+          id: img.nan_image_id,
+          db_id: img.id,
+          url: `https://cloud-api.nan.builders/api/images/${img.nan_image_id}/file`,
+          proxy_url: `/api/nancloud/images/${img.nan_image_id}/file`,
+          seed: img.seed,
+          size_bytes: img.size_bytes,
+          created_at: img.created_at,
+        })),
+      });
+    }
+
+    return {
+      data: result,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  },
+
+  /**
+   * Get sync state from nancloud_sync_state table
+   */
+  getSyncState() {
+    try {
+      const row = db.prepare('SELECT * FROM nancloud_sync_state ORDER BY updated_at DESC LIMIT 1').get();
+      return row || null;
+    } catch {
+      return null;
+    }
+  },
+
+  /**
+   * Update sync state after a sync operation
+   */
+  updateSyncState(stats) {
+    const id = generateId();
+    try {
+      const existing = this.getSyncState();
+      if (existing) {
+        db.prepare(`
+          UPDATE nancloud_sync_state SET
+            last_synced_at = datetime('now'),
+            total_synced = total_synced + ?,
+            total_new = total_new + ?,
+            total_skipped = total_skipped + ?,
+            last_sync_duration_ms = ?,
+            updated_at = datetime('now')
+          WHERE id = ?
+        `).run(
+          stats.totalSynced || 0,
+          stats.newImages || 0,
+          stats.skipped || 0,
+          stats.durationMs || 0,
+          existing.id
+        );
+      } else {
+        db.prepare(`
+          INSERT INTO nancloud_sync_state (id, last_synced_at, total_synced, total_new, total_skipped, last_sync_duration_ms)
+          VALUES (?, datetime('now'), ?, ?, ?, ?)
+        `).run(
+          id,
+          stats.totalSynced || 0,
+          stats.newImages || 0,
+          stats.skipped || 0,
+          stats.durationMs || 0
+        );
+      }
+    } catch (err) {
+      console.error('[Model] Error updating sync state:', err.message);
+    }
+  },
+
+  /**
+   * Count images by source
+   */
+  countBySource(source) {
+    const stmt = db.prepare(
+      `SELECT COUNT(*) as count FROM ${this.tableName} WHERE source = ?`
+    );
+    const result = stmt.get(source);
+    return result ? result.count : 0;
+  },
 };
 
 export default ImageGeneration;

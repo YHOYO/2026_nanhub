@@ -168,6 +168,15 @@ export function initializeDatabase() {
   // Migration: add prompt expansion columns to image_generations
   migrateImageGenerationsExpansion();
 
+  // Migration: add source column for remote image sync
+  migrateImageGenerationsSource();
+
+  // Migration: add nan_request_id for grouping remote images
+  migrateImageGenerationsNanRequestId();
+
+  // NaN Cloud sync state table
+  createSyncStateTable();
+
   console.log('[Database] Schema initialized successfully');
 }
 
@@ -367,6 +376,75 @@ function migrateImageGenerationsExpansion() {
   } catch (error) {
     console.error('[Migration] Error migrating image_generations expansion:', error.message);
     // Don't crash - migration failure shouldn't prevent startup
+  }
+}
+
+/**
+ * Migration: add source column to image_generations table
+ * Tracks whether an image was generated locally ('local') or synced from NaN Cloud ('remote')
+ */
+function migrateImageGenerationsSource() {
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(image_generations)").all();
+    const existingColumns = tableInfo.map(col => col.name);
+
+    if (!existingColumns.includes('source')) {
+      db.exec(`ALTER TABLE image_generations ADD COLUMN source TEXT DEFAULT 'local'`);
+      console.log('[Migration] Added image_generations.source column');
+    } else {
+      console.log('[Migration] image_generations.source column already exists');
+    }
+
+    // Create index for filtering by source
+    db.exec("CREATE INDEX IF NOT EXISTS idx_image_gen_source ON image_generations(source)");
+  } catch (error) {
+    console.error('[Migration] Error migrating image_generations source:', error.message);
+  }
+}
+
+/**
+ * Create nancloud_sync_state table to track last sync timestamp
+ */
+function createSyncStateTable() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nancloud_sync_state (
+        id TEXT PRIMARY KEY,
+        last_synced_at TEXT,
+        total_synced INTEGER DEFAULT 0,
+        total_new INTEGER DEFAULT 0,
+        total_skipped INTEGER DEFAULT 0,
+        last_sync_duration_ms INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    console.log('[Migration] nancloud_sync_state table ready');
+  } catch (error) {
+    console.error('[Migration] Error creating nancloud_sync_state:', error.message);
+  }
+}
+
+/**
+ * Migration: add nan_request_id column to image_generations table
+ * Stores the NaN Cloud requestId for grouping remote images by prompt
+ */
+function migrateImageGenerationsNanRequestId() {
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(image_generations)").all();
+    const existingColumns = tableInfo.map(col => col.name);
+
+    if (!existingColumns.includes('nan_request_id')) {
+      db.exec(`ALTER TABLE image_generations ADD COLUMN nan_request_id TEXT`);
+      console.log('[Migration] Added image_generations.nan_request_id column');
+    } else {
+      console.log('[Migration] image_generations.nan_request_id column already exists');
+    }
+
+    // Create index for grouping by nan_request_id
+    db.exec("CREATE INDEX IF NOT EXISTS idx_image_gen_nan_request_id ON image_generations(nan_request_id)");
+  } catch (error) {
+    console.error('[Migration] Error migrating image_generations nan_request_id:', error.message);
   }
 }
 

@@ -360,6 +360,17 @@ router.post('/generate', async (req, res) => {
 router.get('/:id/file', async (req, res) => {
   try {
     const { id } = req.params;
+    const apiBase = nanCloudConfig.apiBase;
+    const targetUrl = `${apiBase}/api/images/${id}/file`;
+
+    logger.info('[ImageProxy] Attempting to fetch image', {
+      requestedId: id,
+      apiBase,
+      targetUrl,
+      hasSession: !!SessionManager.getSessionCookie(),
+      ip: req.ip,
+      userAgent: req.headers['user-agent']?.substring(0, 80),
+    });
 
     // Check if it's a NaN Cloud image ID or our DB ID
     let nanImageId = id;
@@ -371,11 +382,18 @@ router.get('/:id/file', async (req, res) => {
       const dbImageById = ImageGeneration.findById(id);
       if (dbImageById) {
         nanImageId = dbImageById.nan_image_id;
+        logger.info('[ImageProxy] Resolved DB ID to NaN image ID', { dbId: id, nanImageId });
       }
     }
 
     // Get image file from NaN Cloud
+    logger.info('[ImageProxy] Calling NaNCloudService.getImageFile', { nanImageId });
     const response = await NaNCloudService.getImageFile(nanImageId);
+    logger.info('[ImageProxy] Response received', {
+      type: typeof response,
+      isResponse: response instanceof Response,
+      isBuffer: Buffer.isBuffer(response),
+    });
 
     // Check if response is a Response object
     if (response instanceof Response) {
@@ -728,6 +746,271 @@ router.get('/diagnose', async (req, res) => {
   }
 
   res.json(results);
+});
+
+// ============================================================
+// Remote Image Sync Routes
+// ============================================================
+
+/**
+ * GET /api/nancloud/images/remote
+ * Proxy to NaN Cloud API - fetch images generated at cloud.nan.builders
+ * Does NOT store in local DB - just proxies the response
+ */
+router.get('/remote', async (req, res) => {
+  try {
+    const {
+      limit = 50,
+      offset = 0,
+    } = req.query;
+
+    // Validate session
+    const sessionStatus = SessionManager.getStatus();
+    if (!sessionStatus.has_session || sessionStatus.is_expired) {
+      return res.status(503).json({
+        success: false,
+        error: {
+          code: 'NO_SESSION',
+          message: 'No hay sesión válida de NaN Cloud. Renueva la sesión primero.',
+        },
+      });
+    }
+
+    const result = await NaNCloudService.listRemoteImages(
+      Math.min(parseInt(limit) || 50, 100),
+      parseInt(offset) || 0
+    );
+
+    res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    logger.error('Failed to list remote images', { error: error.message });
+
+    res.status(error.status || 500).json({
+      success: false,
+      error: {
+        code: 'REMOTE_LIST_FAILED',
+        message: 'Error al obtener imágenes de NaN Cloud',
+        details: error.message,
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/nancloud/images/remote-grouped
+ * List synced remote images grouped by request_id (for gallery display)
+ * Only shows images with source='remote' from local DB
+ */
+router.get('/remote-grouped', (req, res) => {
+  try {
+    const {
+      limit = 20,
+      offset = 0,
+    } = req.query;
+
+    const filters = {
+      projectId: req.projectId,
+    };
+
+    const page = Math.floor(parseInt(offset) / parseInt(limit)) + 1;
+    const limitNum = Math.min(parseInt(limit) || 20, 50);
+
+    const result = ImageGeneration.findRemoteGrouped(filters, page, limitNum);
+
+    // Get remote quota stats
+    const remoteCount = ImageGeneration.countBySource('remote');
+    const syncState = ImageGeneration.getSyncState();
+
+    res.json({
+      success: true,
+      data: {
+        groups: result.data,
+        total: result.pagination.total,
+        limit: limitNum,
+        offset: parseInt(offset) || 0,
+        page: result.pagination.page,
+        total_pages: result.pagination.totalPages,
+        sync: {
+          total_synced: remoteCount,
+          last_synced_at: syncState?.last_synced_at || null,
+          last_sync_new: syncState?.total_new || 0,
+          last_sync_skipped: syncState?.total_skipped || 0,
+        },
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to list remote grouped images', { error: error.message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'REMOTE_GROUPED_FAILED',
+        message: 'Error al listar imágenes remotas agrupadas',
+        details: error.message,
+      },
+    });
+  }
+});
+
+/**
+ * POST /api/nancloud/images/sync
+ * Synchronize images from NaN Cloud Platform to local DB
+ * Uses deduplication by nan_image_id to avoid duplicates
+ *
+ * Body: { limit?: number, offset?: number }
+ * - limit: max images per page from NaN Cloud (default 50)
+ * - offset: pagination offset (default 0)
+ */
+router.post('/sync', async (req, res) => {
+  const startTime = Date.now();
+
+  try {
+    const { limit = 50, offset = 0 } = req.body;
+
+    // Validate session
+    const sessionStatus = SessionManager.getStatus();
+    if (!sessionStatus.has_session || sessionStatus.is_expired) {
+      return res.status(503).json({
+        success: false,
+        error: {
+          code: 'NO_SESSION',
+          message: 'No hay sesión válida de NaN Cloud. Renueva la sesión primero.',
+        },
+      });
+    }
+
+    logger.info('[Sync] Starting remote image sync', { limit, offset });
+
+    // Step 1: Fetch one page of images from NaN Cloud
+    const pageResult = await NaNCloudService.listRemoteImages(
+      Math.min(limit, 100),
+      parseInt(offset) || 0
+    );
+    const remoteImages = pageResult.images || [];
+
+    if (remoteImages.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          message: 'No hay imágenes en NaN Cloud para sincronizar',
+          total_remote: 0,
+          new_images: 0,
+          skipped_duplicates: 0,
+          skipped_errors: 0,
+          has_more: false,
+          next_offset: 0,
+          duration_ms: Date.now() - startTime,
+        },
+      });
+    }
+
+    // Step 2: Extract nan_image_ids and check for duplicates
+    const remoteIds = remoteImages.map(img => img.id).filter(Boolean);
+    const existingIds = ImageGeneration.findByNanImageIds(remoteIds);
+
+    // Step 3: Filter out already-existing images
+    const newImages = remoteImages.filter(img => !existingIds.has(img.id));
+
+    logger.info('[Sync] Deduplication result', {
+      total_remote: remoteImages.length,
+      already_exist: existingIds.size,
+      new_to_sync: newImages.length,
+    });
+
+    // Step 4: Insert new images
+    let insertResult = { inserted: 0, skipped: 0, ids: [] };
+    if (newImages.length > 0) {
+      insertResult = ImageGeneration.insertRemoteBatch(newImages, req.projectId || null);
+    }
+
+    const durationMs = Date.now() - startTime;
+
+    // Step 5: Update sync state
+    ImageGeneration.updateSyncState({
+      totalSynced: remoteImages.length,
+      newImages: insertResult.inserted,
+      skipped: newImages.length - insertResult.inserted,
+      durationMs,
+    });
+
+    // Calculate next offset for pagination
+    const nextOffset = pageResult.hasMore ? parseInt(offset) + remoteImages.length : 0;
+
+    logger.info('[Sync] Sync completed', {
+      total_remote: remoteImages.length,
+      new_images: insertResult.inserted,
+      skipped: existingIds.size + (newImages.length - insertResult.inserted),
+      has_more: pageResult.hasMore,
+      duration_ms: durationMs,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        total_remote: remoteImages.length,
+        new_images: insertResult.inserted,
+        skipped_duplicates: existingIds.size,
+        skipped_errors: newImages.length - insertResult.inserted,
+        has_more: pageResult.hasMore,
+        next_offset: nextOffset,
+        total_available: pageResult.total || 0,
+        duration_ms: durationMs,
+        sync_state: ImageGeneration.getSyncState(),
+      },
+    });
+  } catch (error) {
+    const durationMs = Date.now() - startTime;
+    logger.error('[Sync] Sync failed', { error: error.message, duration_ms: durationMs });
+
+    res.status(error.status || 500).json({
+      success: false,
+      error: {
+        code: 'SYNC_FAILED',
+        message: 'Error al sincronizar imágenes de NaN Cloud',
+        details: error.message,
+        duration_ms: durationMs,
+      },
+    });
+  }
+});
+
+/**
+ * GET /api/nancloud/images/sync-status
+ * Get the current sync state (last sync time, counts, etc.)
+ */
+router.get('/sync-status', (req, res) => {
+  try {
+    const syncState = ImageGeneration.getSyncState();
+    const localCount = ImageGeneration.countBySource('local');
+    const remoteCount = ImageGeneration.countBySource('remote');
+    const totalCount = localCount + remoteCount;
+
+    res.json({
+      success: true,
+      data: {
+        sync_state: syncState,
+        counts: {
+          local: localCount,
+          remote: remoteCount,
+          total: totalCount,
+        },
+      },
+    });
+  } catch (error) {
+    logger.error('Failed to get sync status', { error: error.message });
+
+    res.status(500).json({
+      success: false,
+      error: {
+        code: 'SYNC_STATUS_FAILED',
+        message: 'Error al obtener estado de sincronización',
+        details: error.message,
+      },
+    });
+  }
 });
 
 export default router;

@@ -54,10 +54,14 @@ app.use(morgan('combined', {
   },
 }));
 
-// Rate limiting
+// Rate limiting - exclude image file requests (they need high concurrency for gallery)
 const limiter = rateLimit({
   windowMs: config.rateLimitWindowMs,
   max: config.rateLimitMaxRequests,
+  skip: (req) => {
+    // Skip rate limit for image file requests (proxy to NaN Cloud)
+    return req.path.includes('/file') || req.path.includes('/images/');
+  },
   message: {
     error: {
       message: 'Too many requests, please try again later.',

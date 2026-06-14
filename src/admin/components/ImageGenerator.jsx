@@ -7,8 +7,9 @@ import React, { useState, useEffect, useCallback } from 'react';
  * Features:
  * - Prompt textarea with aspect ratio selector
  * - Automatic 4-variant generation
- * - Gallery with grouped variants
+ * - Gallery with grouped variants (Local + NaN Cloud tabs)
  * - Image detail modal with full metadata
+ * - Remote image sync from NaN Cloud platform
  */
 
 const ASPECT_RATIOS = [
@@ -288,6 +289,60 @@ const styles = {
     borderRadius: '50%',
     animation: 'spin 0.6s linear infinite',
   },
+  // Tab styles
+  tabBar: {
+    display: 'flex',
+    gap: '2px',
+    marginBottom: '16px',
+    background: '#18181b',
+    borderRadius: '10px',
+    padding: '3px',
+    border: '1px solid rgba(30,30,46,0.6)',
+  },
+  tab: (active) => ({
+    flex: 1,
+    padding: '8px 16px',
+    borderRadius: '8px',
+    border: 'none',
+    background: active ? '#8b5cf6' : 'transparent',
+    color: active ? '#fff' : '#71717a',
+    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    fontSize: '11px',
+    cursor: 'pointer',
+    transition: 'all 0.15s',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '6px',
+  }),
+  syncBtn: (disabled) => ({
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    padding: '10px 16px',
+    borderRadius: '8px',
+    border: '1px solid rgba(34,197,94,0.3)',
+    background: disabled ? 'rgba(34,197,94,0.2)' : 'rgba(34,197,94,0.1)',
+    color: disabled ? '#22c55e' : '#4ade80',
+    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    fontSize: '12px',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    transition: 'all 0.15s',
+    width: '100%',
+  }),
+  syncBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    padding: '2px 8px',
+    borderRadius: '12px',
+    background: 'rgba(34,197,94,0.1)',
+    border: '1px solid rgba(34,197,94,0.2)',
+    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    fontSize: '10px',
+    color: '#4ade80',
+  },
 };
 
 // Inject keyframes for spinner
@@ -308,11 +363,24 @@ export default function ImageGenerator() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Tab state
+  const [activeTab, setActiveTab] = useState('local'); // 'local' | 'remote'
+
+  // Remote gallery state
+  const [remoteGroups, setRemoteGroups] = useState([]);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteSyncing, setRemoteSyncing] = useState(false);
+  const [remoteSyncResult, setRemoteSyncResult] = useState(null);
+  const [remoteSyncState, setRemoteSyncState] = useState(null);
+  const [remoteHasMore, setRemoteHasMore] = useState(false);
+  const [remoteNextOffset, setRemoteNextOffset] = useState(0);
+  const [remoteTotalAvailable, setRemoteTotalAvailable] = useState(0);
+
   // Modal state
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedImageIdx, setSelectedImageIdx] = useState(0);
 
-  // Fetch grouped images
+  // Fetch grouped images (local)
   const fetchGroups = useCallback(async () => {
     try {
       const res = await fetch('/api/nancloud/images/grouped?limit=50');
@@ -328,9 +396,66 @@ export default function ImageGenerator() {
     }
   }, []);
 
+  // Fetch remote grouped images
+  const fetchRemoteGroups = useCallback(async () => {
+    setRemoteLoading(true);
+    try {
+      const res = await fetch('/api/nancloud/images/remote-grouped?limit=50');
+      const data = await res.json();
+      if (data.success) {
+        // Ensure groups is always a plain array of serializable objects
+        const groups = Array.isArray(data.data.groups)
+          ? data.data.groups.map(g => ({
+              ...g,
+              images: Array.isArray(g.images) ? g.images.map(img => ({
+                id: img.id,
+                db_id: img.db_id,
+                url: img.url || '',
+                seed: img.seed,
+                size_bytes: img.size_bytes,
+                created_at: img.created_at,
+              })) : [],
+            }))
+          : [];
+        setRemoteGroups(groups);
+        const sync = data.data.sync || null;
+        setRemoteSyncState(sync ? {
+          total_synced: sync.total_synced || 0,
+          last_synced_at: sync.last_synced_at || null,
+          last_sync_new: sync.last_sync_new || 0,
+          last_sync_skipped: sync.last_sync_skipped || 0,
+        } : null);
+      }
+    } catch (err) {
+      console.error('Failed to fetch remote groups:', err);
+    } finally {
+      setRemoteLoading(false);
+    }
+  }, []);
+
+  // Fetch sync status
+  const fetchSyncStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/nancloud/images/sync-status');
+      const data = await res.json();
+      if (data.success) {
+        setRemoteSyncState(data.data.sync_state);
+      }
+    } catch (err) {
+      console.error('Failed to fetch sync status:', err);
+    }
+  }, []);
+
   useEffect(() => {
     fetchGroups();
   }, [fetchGroups]);
+
+  // Fetch remote data when switching to remote tab
+  useEffect(() => {
+    if (activeTab === 'remote') {
+      fetchRemoteGroups();
+    }
+  }, [activeTab, fetchRemoteGroups]);
 
   // Generate images
   const handleGenerate = async () => {
@@ -366,6 +491,52 @@ export default function ImageGenerator() {
     }
   };
 
+  // Sync remote images from NaN Cloud (supports pagination)
+  const handleSync = async (useOffset = null) => {
+    if (remoteSyncing) return;
+
+    setRemoteSyncing(true);
+    if (useOffset === null) {
+      setRemoteSyncResult(null); // Reset only on fresh sync
+    }
+    setError(null);
+
+    try {
+      const currentOffset = useOffset !== null ? useOffset : 0;
+      const res = await fetch('/api/nancloud/images/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ limit: 50, offset: currentOffset }),
+      });
+
+      const data = await res.json();
+
+      if (!data.success) {
+        throw new Error(data.error?.message || 'Sync failed');
+      }
+
+      // Store only plain data to avoid circular reference issues with React state
+      const syncData = data.data || {};
+      setRemoteSyncResult({
+        new_images: syncData.new_images || 0,
+        skipped_duplicates: syncData.skipped_duplicates || 0,
+        total_remote: syncData.total_remote || 0,
+        duration_ms: syncData.duration_ms || 0,
+      });
+      setRemoteHasMore(data.data.has_more || false);
+      setRemoteNextOffset(data.data.next_offset || 0);
+      setRemoteTotalAvailable(data.data.total_available || 0);
+
+      // Refresh remote gallery
+      await fetchRemoteGroups();
+      await fetchSyncStatus();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRemoteSyncing(false);
+    }
+  };
+
   // Open modal for a group
   const openGroup = (group, idx = 0) => {
     setSelectedGroup(group);
@@ -395,10 +566,15 @@ export default function ImageGenerator() {
     });
   };
 
-  // Get NaN Cloud image URL
+  // Get image URL - siempre usa el proxy local
+  // El proxy es necesario porque NaN Cloud tiene CORS restrictivo (solo acepta cloud.nan.builders)
   const getImageUrl = (image) => {
     return `/api/nancloud/images/${image.id}/file`;
   };
+
+  // Current groups based on active tab
+  const currentGroups = activeTab === 'local' ? groups : remoteGroups;
+  const currentLoading = activeTab === 'local' ? loading : remoteLoading;
 
   return (
     <div style={styles.container}>
@@ -507,24 +683,163 @@ export default function ImageGenerator() {
           <div style={styles.quotaText}>
             Quota: {quota.used} / {quota.total} images used
           </div>
+
+          {/* Sync section - only visible on remote tab */}
+          {activeTab === 'remote' && (
+            <div style={{ borderTop: '1px solid #27272a', paddingTop: '12px', marginTop: '4px' }}>
+              <p style={styles.label}>NaN Cloud Sync</p>
+
+              {remoteSyncState && (
+                <div style={{ marginBottom: '8px' }}>
+                  <div style={styles.syncBadge}>
+                    {remoteSyncState.last_synced_at
+                      ? `Last sync: ${formatDate(remoteSyncState.last_synced_at)}`
+                      : 'Never synced'}
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="button"
+                disabled={remoteSyncing}
+                onClick={() => handleSync()}
+                style={styles.syncBtn(remoteSyncing)}
+              >
+                {remoteSyncing ? (
+                  <>
+                    <div style={styles.spinner} />
+                    Syncing...
+                  </>
+                ) : (
+                  <>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                      <path d="M3 3v5h5" />
+                      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                      <path d="M16 16h5v5" />
+                    </svg>
+                    Sync from NaN Cloud
+                  </>
+                )}
+              </button>
+
+              {remoteSyncResult && (
+                <div style={{
+                  marginTop: '8px',
+                  padding: '8px 10px',
+                  borderRadius: '6px',
+                  background: 'rgba(34,197,94,0.05)',
+                  border: '1px solid rgba(34,197,94,0.15)',
+                  fontSize: '11px',
+                  color: '#a1a1aa',
+                  fontFamily: "'SF Mono', monospace",
+                  lineHeight: '1.6',
+                }}>
+                  <div style={{ color: '#4ade80', fontWeight: 'bold', marginBottom: '4px' }}>Sync completed</div>
+                  <div>New: {remoteSyncResult.new_images} | Duplicates: {remoteSyncResult.skipped_duplicates}</div>
+                  {remoteTotalAvailable > 0 && (
+                    <div>Available: {remoteTotalAvailable} | Synced: {remoteSyncResult.total_remote}</div>
+                  )}
+                  <div style={{ color: '#52525b' }}>{remoteSyncResult.duration_ms}ms</div>
+                </div>
+              )}
+
+              {remoteHasMore && (
+                <button
+                  type="button"
+                  disabled={remoteSyncing}
+                  onClick={() => handleSync(remoteNextOffset)}
+                  style={{
+                    ...styles.syncBtn(remoteSyncing),
+                    marginTop: '6px',
+                    background: remoteSyncing ? 'rgba(59,130,246,0.2)' : 'rgba(59,130,246,0.1)',
+                    border: '1px solid rgba(59,130,246,0.3)',
+                    color: '#60a5fa',
+                  }}
+                >
+                  {remoteSyncing ? (
+                    <>
+                      <div style={styles.spinner} />
+                      Loading more...
+                    </>
+                  ) : (
+                    <>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 5v14M5 12h14" />
+                      </svg>
+                      Load more images
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* RIGHT SECTION - GALLERY */}
         <div>
-          <p style={styles.sectionHeader}>Your gallery ({groups.length} generations)</p>
+          {/* Tab bar */}
+          <div style={styles.tabBar}>
+            <button
+              type="button"
+              style={styles.tab(activeTab === 'local')}
+              onClick={() => setActiveTab('local')}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="7" height="7" /><rect x="14" y="3" width="7" height="7" />
+                <rect x="3" y="14" width="7" height="7" /><rect x="14" y="14" width="7" height="7" />
+              </svg>
+              Local ({groups.length})
+            </button>
+            <button
+              type="button"
+              style={styles.tab(activeTab === 'remote')}
+              onClick={() => setActiveTab('remote')}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+              </svg>
+              NaN Cloud ({remoteGroups.length})
+            </button>
+          </div>
 
-          {loading ? (
+          {/* Gallery header */}
+          <p style={styles.sectionHeader}>
+            {activeTab === 'local'
+              ? `Generated locally (${groups.length} generations)`
+              : `Synced from NaN Cloud (${remoteGroups.length} groups)`
+            }
+          </p>
+
+          {currentLoading ? (
             <div style={styles.emptyState}>Loading gallery...</div>
-          ) : groups.length === 0 ? (
+          ) : currentGroups.length === 0 ? (
             <div style={styles.emptyState}>
-              <p style={{ fontSize: '14px', marginBottom: '8px' }}>No images yet</p>
-              <p style={{ fontSize: '12px', color: '#3f3f46' }}>
-                Write a prompt and click Generate to create your first images
-              </p>
+              {activeTab === 'local' ? (
+                <>
+                  <p style={{ fontSize: '14px', marginBottom: '8px' }}>No images yet</p>
+                  <p style={{ fontSize: '12px', color: '#3f3f46' }}>
+                    Write a prompt and click Generate to create your first images
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p style={{ fontSize: '14px', marginBottom: '8px' }}>No synced images</p>
+                  <p style={{ fontSize: '12px', color: '#3f3f46', marginBottom: '16px' }}>
+                    Click "Sync from NaN Cloud" to import images generated at cloud.nan.builders
+                  </p>
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#3f3f46" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                    <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
+                    <path d="M16 16h5v5" />
+                  </svg>
+                </>
+              )}
             </div>
           ) : (
             <div style={styles.galleryGrid}>
-              {groups.map((group) => (
+              {currentGroups.map((group) => (
                 <div
                   key={group.request_id}
                   style={styles.groupCard}
@@ -561,6 +876,9 @@ export default function ImageGenerator() {
                     <div style={styles.groupMeta}>
                       <span>{group.variants}× variants</span>
                       <span>{group.width}×{group.height}</span>
+                      {group.source === 'remote' && (
+                        <span style={{ color: '#4ade80' }}>☁ remote</span>
+                      )}
                       <span>{formatDate(group.created_at)}</span>
                     </div>
                   </div>
@@ -603,6 +921,13 @@ export default function ImageGenerator() {
 
             {/* Right: Details */}
             <div style={styles.modalDetails}>
+              {/* Source badge */}
+              {selectedGroup.source === 'remote' && (
+                <div style={styles.syncBadge}>
+                  ☁ Synced from NaN Cloud
+                </div>
+              )}
+
               {/* Original Prompt */}
               <div style={styles.detailSection}>
                 <div style={styles.detailLabel}>Original Prompt</div>
