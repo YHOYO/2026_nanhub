@@ -343,6 +343,88 @@ const styles = {
     fontSize: '10px',
     color: '#4ade80',
   },
+  // Session panel styles
+  sessionToggle: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '10px 14px',
+    borderRadius: '8px',
+    border: '1px solid #27272a',
+    background: '#111',
+    cursor: 'pointer',
+    transition: 'all 0.15s',
+    width: '100%',
+    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    fontSize: '11px',
+    color: '#a1a1aa',
+  },
+  sessionPanel: {
+    border: '1px solid rgba(30,30,46,0.6)',
+    borderRadius: '10px',
+    background: '#0f0f13',
+    padding: '14px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+  },
+  sessionStatusRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    fontSize: '11px',
+    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    color: '#a1a1aa',
+    flexWrap: 'wrap',
+  },
+  sessionTokenInput: {
+    width: '100%',
+    resize: 'none',
+    borderRadius: '6px',
+    border: '1px solid #27272a',
+    background: '#000',
+    padding: '8px 10px',
+    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    fontSize: '11px',
+    color: '#fff',
+    outline: 'none',
+    boxSizing: 'border-box',
+    lineHeight: '1.4',
+  },
+  saveSessionBtn: (disabled) => ({
+    width: '100%',
+    padding: '8px 12px',
+    borderRadius: '6px',
+    border: 'none',
+    background: disabled ? 'rgba(34,197,94,0.3)' : '#22c55e',
+    color: disabled ? '#4ade80' : '#fff',
+    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    fontSize: '11px',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.6 : 1,
+    transition: 'all 0.15s',
+  }),
+  clearSessionBtn: {
+    width: '100%',
+    padding: '8px 12px',
+    borderRadius: '6px',
+    border: '1px solid rgba(239,68,68,0.3)',
+    background: 'rgba(239,68,68,0.1)',
+    color: '#f87171',
+    fontFamily: "'SF Mono', 'Fira Code', monospace",
+    fontSize: '11px',
+    cursor: 'pointer',
+    transition: 'all 0.15s',
+  },
+  sessionMsg: (isError) => ({
+    padding: '6px 10px',
+    borderRadius: '6px',
+    background: isError ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)',
+    border: `1px solid ${isError ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}`,
+    color: isError ? '#f87171' : '#4ade80',
+    fontSize: '10px',
+    fontFamily: "'SF Mono', 'Fira Code', monospace",
+  }),
 };
 
 // Inject keyframes for spinner
@@ -379,6 +461,13 @@ export default function ImageGenerator() {
   // Modal state
   const [selectedGroup, setSelectedGroup] = useState(null);
   const [selectedImageIdx, setSelectedImageIdx] = useState(0);
+
+  // Session management state
+  const [sessionStatus, setSessionStatus] = useState(null);
+  const [newToken, setNewToken] = useState('');
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [showSessionPanel, setShowSessionPanel] = useState(false);
+  const [sessionMessage, setSessionMessage] = useState(null);
 
   // Fetch grouped images (local)
   const fetchGroups = useCallback(async () => {
@@ -450,6 +539,22 @@ export default function ImageGenerator() {
     fetchGroups();
   }, [fetchGroups]);
 
+  // Fetch session status on mount
+  useEffect(() => {
+    const fetchSessionStatus = async () => {
+      try {
+        const res = await fetch('/api/nancloud/auth/status');
+        const data = await res.json();
+        if (data.success) {
+          setSessionStatus(data.data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch session status:', err);
+      }
+    };
+    fetchSessionStatus();
+  }, []);
+
   // Fetch remote data when switching to remote tab
   useEffect(() => {
     if (activeTab === 'remote') {
@@ -473,6 +578,7 @@ export default function ImageGenerator() {
           aspect_ratio: aspectRatio,
           variants: variants,
           enhance_prompt: true,
+          two_phase_mode: true,
         }),
       });
 
@@ -566,6 +672,83 @@ export default function ImageGenerator() {
     });
   };
 
+  // Save session token
+  const saveSession = async () => {
+    setSessionMessage(null);
+    const token = newToken.trim();
+
+    if (!token) {
+      setSessionMessage({ text: 'El token no puede estar vacío', isError: true });
+      return;
+    }
+
+    if (!token.startsWith('eyJ')) {
+      setSessionMessage({ text: 'El token debe comenzar con "eyJ" (JWT inválido)', isError: true });
+      return;
+    }
+
+    setSessionLoading(true);
+    try {
+      const res = await fetch('/api/nancloud/auth/set-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_cookie: token }),
+        credentials: 'include',
+      });
+
+      const data = await res.json();
+
+      if (!data.success) {
+        throw new Error(data.error?.message || 'Error al guardar sesión');
+      }
+
+      setSessionMessage({ text: 'Sesión guardada correctamente ✓', isError: false });
+      setNewToken('');
+
+      // Refresh session status
+      const statusRes = await fetch('/api/nancloud/auth/status');
+      const statusData = await statusRes.json();
+      if (statusData.success) {
+        setSessionStatus(statusData.data);
+      }
+    } catch (err) {
+      setSessionMessage({ text: err.message, isError: true });
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
+  // Clear session
+  const clearSession = async () => {
+    setSessionMessage(null);
+    setSessionLoading(true);
+    try {
+      const res = await fetch('/api/nancloud/auth/session', {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+
+      const data = await res.json();
+
+      if (!data.success) {
+        throw new Error(data.error?.message || 'Error al limpiar sesión');
+      }
+
+      setSessionMessage({ text: 'Sesión desactivada correctamente', isError: false });
+
+      // Refresh session status
+      const statusRes = await fetch('/api/nancloud/auth/status');
+      const statusData = await statusRes.json();
+      if (statusData.success) {
+        setSessionStatus(statusData.data);
+      }
+    } catch (err) {
+      setSessionMessage({ text: err.message, isError: true });
+    } finally {
+      setSessionLoading(false);
+    }
+  };
+
   // Get image URL - siempre usa el proxy local
   // El proxy es necesario porque NaN Cloud tiene CORS restrictivo (solo acepta cloud.nan.builders)
   const getImageUrl = (image) => {
@@ -578,6 +761,92 @@ export default function ImageGenerator() {
 
   return (
     <div style={styles.container}>
+      {/* SESSION MANAGEMENT PANEL */}
+      <div style={{ marginBottom: '20px' }}>
+        <button
+          type="button"
+          style={styles.sessionToggle}
+          onClick={() => setShowSessionPanel(!showSessionPanel)}
+        >
+          <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span>{sessionStatus?.has_session && !sessionStatus?.is_expired ? '🟢' : '🔴'}</span>
+            <span>Sesión NaN Cloud</span>
+            {sessionStatus?.has_session && !sessionStatus?.is_expired && (
+              <span style={{ color: '#52525b' }}>
+                — {sessionStatus.username} ({sessionStatus.hours_remaining}h restantes)
+              </span>
+            )}
+          </span>
+          <span style={{ transition: 'transform 0.2s', transform: showSessionPanel ? 'rotate(180deg)' : 'rotate(0deg)' }}>
+            ▼
+          </span>
+        </button>
+
+        {showSessionPanel && (
+          <div style={{ ...styles.sessionPanel, marginTop: '8px' }}>
+            {/* Session status */}
+            {sessionStatus && (
+              <div style={styles.sessionStatusRow}>
+                <span>Estado:</span>
+                <span style={{ color: sessionStatus.has_session && !sessionStatus.is_expired ? '#4ade80' : '#f87171' }}>
+                  {sessionStatus.has_session
+                    ? (sessionStatus.is_expired ? 'Expirada' : 'Activa')
+                    : 'Sin sesión'}
+                </span>
+                {sessionStatus.has_session && !sessionStatus.is_expired && (
+                  <>
+                    <span style={{ color: '#52525b' }}>|</span>
+                    <span>{sessionStatus.username}</span>
+                    <span style={{ color: '#52525b' }}>({sessionStatus.email})</span>
+                    <span style={{ color: '#52525b' }}>|</span>
+                    <span>{sessionStatus.hours_remaining}h restantes</span>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Token input */}
+            <div>
+              <label style={styles.label}>Token JWT</label>
+              <textarea
+                rows={3}
+                placeholder="Pega aquí el JWT de nan_session..."
+                value={newToken}
+                onChange={(e) => setNewToken(e.target.value)}
+                style={styles.sessionTokenInput}
+              />
+            </div>
+
+            {/* Save button */}
+            <button
+              type="button"
+              disabled={sessionLoading || !newToken.trim()}
+              onClick={saveSession}
+              style={styles.saveSessionBtn(sessionLoading || !newToken.trim())}
+            >
+              {sessionLoading ? 'Guardando...' : 'Guardar sesión'}
+            </button>
+
+            {/* Clear button */}
+            <button
+              type="button"
+              disabled={sessionLoading}
+              onClick={clearSession}
+              style={styles.clearSessionBtn}
+            >
+              {sessionLoading ? 'Procesando...' : 'Limpiar sesión'}
+            </button>
+
+            {/* Message */}
+            {sessionMessage && (
+              <div style={styles.sessionMsg(sessionMessage.isError)}>
+                {sessionMessage.text}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       <div style={styles.grid}>
         {/* LEFT PANEL */}
         <div style={styles.panel}>

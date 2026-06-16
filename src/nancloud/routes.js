@@ -39,6 +39,7 @@ router.post('/generate', async (req, res) => {
       enhance_prompt = nanCloudConfig.promptExpansion.enabled,
       prompt_model,
       enhance_mode = 'json',
+      two_phase_mode = nanCloudConfig.promptExpansion.analysis?.enabled ?? true,
     } = req.body;
 
     // Validate prompt
@@ -116,32 +117,44 @@ router.post('/generate', async (req, res) => {
     let finalPrompt = prompt.trim();
     let expansionResult = null;
 
+    logger.info('[PromptExpansion] Checking expansion conditions', {
+      enhance_prompt,
+      promptExpansionEnabled: nanCloudConfig.promptExpansion.enabled,
+      two_phase_mode,
+      promptLength: prompt.trim().length,
+    });
+
     if (enhance_prompt && nanCloudConfig.promptExpansion.enabled) {
       try {
-        logger.info('Expanding prompt via LLM', {
+        logger.info('[PromptExpansion] Starting prompt expansion', {
           model: prompt_model || nanCloudConfig.promptExpansion.defaultModel,
           mode: enhance_mode,
+          twoPhaseMode: two_phase_mode,
           inputLength: prompt.trim().length,
         });
 
         expansionResult = await PromptExpander.expandPrompt(prompt.trim(), {
           model: prompt_model,
           mode: enhance_mode,
+          twoPhaseMode: two_phase_mode,
         });
 
         finalPrompt = expansionResult.expandedPrompt;
 
-        logger.info('Prompt expansion completed', {
+        logger.info('[PromptExpansion] Prompt expansion completed successfully', {
           model: expansionResult.model,
+          twoPhase: expansionResult.twoPhase,
           inputLength: prompt.trim().length,
           outputLength: finalPrompt.length,
           elapsedMs: expansionResult.elapsedMs,
           tokens: expansionResult.tokens,
+          finalPromptPreview: finalPrompt.substring(0, 200) + '...',
         });
       } catch (expansionError) {
         // If expansion fails, fall back to the original prompt
-        logger.error('Prompt expansion failed, using original prompt', {
+        logger.error('[PromptExpansion] Prompt expansion failed, using original prompt', {
           error: expansionError.message,
+          stack: expansionError.stack,
           fallbackMode: nanCloudConfig.promptExpansion.fallbackMode,
         });
 
@@ -152,6 +165,10 @@ router.post('/generate', async (req, res) => {
           throw expansionError;
         }
       }
+    } else {
+      logger.info('[PromptExpansion] Prompt expansion skipped', {
+        reason: !enhance_prompt ? 'enhance_prompt is false' : 'promptExpansion.enabled is false',
+      });
     }
 
     // ============================================================
@@ -197,7 +214,8 @@ router.post('/generate', async (req, res) => {
         images.push({
           id: nanImage.id,
           db_id: dbImageId,
-          url: `/api/nancloud/images/${nanImage.id}/file`,
+          url: `https://cloud-api.nan.builders/api/images/${nanImage.id}/file`,
+          proxy_url: `/api/nancloud/images/${nanImage.id}/file`,
           width: nanImage.width,
           height: nanImage.height,
           model: nanImage.model,
@@ -262,6 +280,7 @@ router.post('/generate', async (req, res) => {
       ...(expansionResult && !expansionResult.error && !expansionResult.fallback ? {
         prompt_expansion: {
           enabled: true,
+          two_phase: expansionResult.twoPhase || false,
           model: expansionResult.model,
           mode: expansionResult.mode,
           original_prompt: prompt.trim(),
@@ -269,6 +288,17 @@ router.post('/generate', async (req, res) => {
           structured_data: expansionResult.structuredData,
           tokens: expansionResult.tokens,
           expansion_time_ms: expansionResult.elapsedMs,
+          // Two-phase specific metadata
+          ...(expansionResult.twoPhase ? {
+            analysis: {
+              elements_count: expansionResult.analysis?.elements?.length || 0,
+              conflicts_found: expansionResult.analysis?.analysis?.conflicts?.length || 0,
+              dominant_style: expansionResult.analysis?.analysis?.dominant_style || null,
+              resolutions: expansionResult.analysis?.analysis?.resolutions || [],
+              recommendation: expansionResult.analysis?.recommendation || null,
+            },
+            coherence: expansionResult.coherence || null,
+          } : {}),
         },
       } : expansionResult?.fallback ? {
         prompt_expansion: {
@@ -454,7 +484,7 @@ router.get('/:id/file', async (req, res) => {
  * GET /api/nancloud/images/grouped
  * List images grouped by request_id (for gallery display)
  */
-router.get('/grouped', (req, res) => {
+router.get('/grouped', async (req, res) => {
   try {
     const {
       limit = 20,
@@ -470,8 +500,19 @@ router.get('/grouped', (req, res) => {
 
     const result = ImageGeneration.findGroupedByRequestId(filters, page, limitNum);
 
-    // Get quota stats
+    // Get quota stats from local DB
     const quotaStats = ImageGeneration.getQuotaStats();
+
+    // Try to get real quota from NaN Cloud API (includes images generated on the platform)
+    let cloudUsed = quotaStats.totalGenerations || 0;
+    try {
+      const remoteResult = await NaNCloudService.listRemoteImages(1, 0);
+      if (remoteResult && remoteResult.used > 0) {
+        cloudUsed = remoteResult.used;
+      }
+    } catch (quotaError) {
+      logger.warn('[GroupedImages] Could not fetch cloud quota, using local count', { error: quotaError.message });
+    }
 
     res.json({
       success: true,
@@ -484,9 +525,9 @@ router.get('/grouped', (req, res) => {
         total_pages: result.pagination.totalPages,
         quota: {
           total: nanCloudConfig.monthlyQuota,
-          used: quotaStats.totalImages || 0,
-          remaining: nanCloudConfig.monthlyQuota - (quotaStats.totalImages || 0),
-          total_generations: quotaStats.totalGenerations || 0,
+          used: cloudUsed,
+          remaining: nanCloudConfig.monthlyQuota - cloudUsed,
+          total_images: quotaStats.totalImages || 0,
         },
       },
     });
