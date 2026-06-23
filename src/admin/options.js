@@ -17,6 +17,7 @@ export const componentLoader = new ComponentLoader();
 // Register custom components
 componentLoader.add('ApiKeysPage', './components/ApiKeysRedirect.jsx');
 componentLoader.add('MetricsDashboard', './components/MetricsDashboard.jsx');
+componentLoader.add('CacheMetrics', './components/CacheMetrics.jsx');
 componentLoader.add('ImageGenerator', './components/ImageGenerator.jsx');
 
 // AdminJS configuration
@@ -49,6 +50,11 @@ const adminOptions = {
         name: 'Analytics',
         icon: 'BarChart',
         page: 'metrics',
+      },
+      {
+        name: 'Cache Metrics',
+        icon: 'Database',
+        page: 'cache-metrics',
       },
       {
         name: 'Image Generator',
@@ -264,6 +270,10 @@ const adminOptions = {
     'metrics': {
       component: 'MetricsDashboard',
       icon: 'BarChart',
+    },
+    'cache-metrics': {
+      component: 'CacheMetrics',
+      icon: 'Database',
     },
     'image-generator': {
       component: 'ImageGenerator',

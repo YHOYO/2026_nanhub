@@ -1,5 +1,6 @@
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import interceptor from './interceptor.js';
+import timeQuantizer from './timeQuantizer.js';
 import config from '../config/environment.js';
 import logger from '../utils/logger.js';
 import ProjectApiKey from '../models/ProjectApiKey.js';
@@ -33,6 +34,15 @@ export function createProxy() {
     onProxyReq(proxyReq, req, res) {
       // Replace Authorization header: client's npx_ key → server's sk- key
       proxyReq.setHeader('Authorization', `Bearer ${config.nanApiKey}`);
+
+      // Apply time quantization to messages before forwarding
+      if (req.body && req.body.messages && req.url.includes('/chat/completions')) {
+        const { requestBody, metadata } = timeQuantizer.processRequest(req.body);
+        req.body = requestBody;
+        req.quantizationMetadata = metadata;
+        
+        logger.proxy('[TimeQuantizer] Applied to generic proxy', metadata);
+      }
 
       // Re-serialize body if express.json() already consumed the stream
       // http-proxy-middleware uses req.pipe(proxyReq) internally, but the stream
@@ -303,10 +313,24 @@ export async function embeddingsPassthrough(req, res) {
 
 /**
  * POST /v1/chat/completions - passthrough to NaN API (with streaming support)
+ * Applies time quantization to messages before forwarding to improve cache hits.
  */
 export async function chatCompletionsPassthrough(req, res) {
   try {
     const isStreaming = req.body?.stream === true;
+
+    // Apply time quantization to messages before forwarding
+    let processedBody = req.body;
+    let quantizationMetadata = null;
+    
+    if (req.body?.messages) {
+      const processed = timeQuantizer.processRequest(req.body);
+      processedBody = processed.requestBody;
+      quantizationMetadata = processed.metadata;
+      
+      // Attach metadata to request for interceptor
+      req.quantizationMetadata = quantizationMetadata;
+    }
 
     const response = await fetch(`${config.nanApiBaseUrl}/chat/completions`, {
       method: 'POST',
@@ -314,7 +338,7 @@ export async function chatCompletionsPassthrough(req, res) {
         'Authorization': `Bearer ${config.nanApiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(req.body),
+      body: JSON.stringify(processedBody),
     });
 
     if (!response.ok) {
@@ -327,6 +351,12 @@ export async function chatCompletionsPassthrough(req, res) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
+      
+      // Add cache headers for debugging
+      if (quantizationMetadata) {
+        res.setHeader('X-Quantization-Block', quantizationMetadata.quantizationBlock || '');
+        res.setHeader('X-Timestamp-Replaced', quantizationMetadata.timestampReplaced ? 'true' : 'false');
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -346,6 +376,13 @@ export async function chatCompletionsPassthrough(req, res) {
     } else {
       // Non-streaming: return full JSON response
       const data = await response.json();
+      
+      // Add cache headers for debugging
+      if (quantizationMetadata) {
+        res.setHeader('X-Quantization-Block', quantizationMetadata.quantizationBlock || '');
+        res.setHeader('X-Timestamp-Replaced', quantizationMetadata.timestampReplaced ? 'true' : 'false');
+      }
+      
       res.status(response.status).json(data);
     }
   } catch (error) {

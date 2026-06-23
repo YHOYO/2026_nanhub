@@ -287,11 +287,44 @@ router.get('/super/model/:model', (req, res) => {
       endDate: endDateTime,
     });
 
+    // Get cache stats and token flow for this model
+    const cacheStats = Request.getCacheStats({
+      projectId,
+      startDate: start,
+      endDate: endDateTime,
+    });
+    // Filter cache stats by model using getCacheByModel
+    const cacheByModel = Request.getCacheByModel({
+      projectId,
+      startDate: start,
+      endDate: endDateTime,
+    });
+    const modelCacheStats = cacheByModel.find(c => c.model === model) || {
+      cacheHits: 0, cacheHitRate: 0, tokensSent: 0, tokensReceived: 0
+    };
+    const tokenFlow = Request.getTokenFlow({
+      projectId,
+      startDate: start,
+      endDate: endDateTime,
+    });
+
     res.json({
       summary: requestDetail.summary,
       dailyTrend: dailyTrend.length > 0 ? dailyTrend : requestDetail.dailyTrend,
       byProject: byProject.length > 0 ? byProject : requestDetail.byProject,
       byApiKey: requestDetail.byApiKey,
+      cacheStats: {
+        cacheHits: modelCacheStats.cacheHits || 0,
+        cacheHitRate: Math.round((modelCacheStats.cacheHitRate || 0) * 100) / 100,
+        tokenSavings: (modelCacheStats.tokensSent || 0) - (modelCacheStats.tokensReceived || 0),
+        tokensSent: modelCacheStats.tokensSent || 0,
+        tokensReceived: modelCacheStats.tokensReceived || 0,
+      },
+      tokenFlow: {
+        tokensSentToUpstream: tokenFlow.tokensSentToUpstream || 0,
+        tokensReceivedFromUpstream: tokenFlow.tokensReceivedFromUpstream || 0,
+        avgTokenDelta: Math.round(tokenFlow.avgTokenDelta || 0),
+      },
       model,
       period: { start, end: endDate, label: period || '7d' },
     });
@@ -340,13 +373,134 @@ router.get('/super/apikey/:apiKeyHash/detail', (req, res) => {
       endDate: endDateTime,
     });
 
+    // Get cache stats for this API key
+    const cacheStats = Request.getCacheStats({
+      startDate: start,
+      endDate: endDateTime,
+    });
+
+    const tokenFlow = Request.getTokenFlow({
+      startDate: start,
+      endDate: endDateTime,
+    });
+
     res.json({
       ...detail,
+      cacheStats: {
+        cacheHits: cacheStats.cacheHits || 0,
+        cacheHitRate: Math.round((cacheStats.cacheHitRate || 0) * 100) / 100,
+        tokenSavings: cacheStats.tokenSavings || 0,
+        tokensSent: cacheStats.tokensSent || 0,
+        tokensReceived: cacheStats.tokensReceived || 0,
+      },
+      tokenFlow: {
+        tokensSentToUpstream: tokenFlow.tokensSentToUpstream || 0,
+        tokensReceivedFromUpstream: tokenFlow.tokensReceivedFromUpstream || 0,
+        avgTokenDelta: Math.round(tokenFlow.avgTokenDelta || 0),
+      },
       period: { start, end: endDate, label: period || '7d' },
     });
   } catch (error) {
     logger.error('Failed to get API key detail', { error: error.message });
     res.status(500).json({ error: 'Failed to get API key detail' });
+  }
+});
+
+/**
+ * GET /api/dashboard/super/project/:id
+ * Get detailed stats for a specific project
+ * Query params: period
+ */
+router.get('/super/project/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const { period } = req.query;
+
+    const now = new Date();
+    const endDate = now.toISOString().split('T')[0];
+    const endDateTime = endDate + ' 23:59:59';
+
+    let start;
+    switch (period) {
+      case '1d':
+        start = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '30d':
+        start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '90d':
+        start = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case 'all':
+        start = '2000-01-01';
+        break;
+      case '7d':
+      default:
+        start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+    }
+
+    const detail = Request.getProjectDetail(id, {
+      startDate: start,
+      endDate: endDateTime,
+    });
+
+    res.json({
+      ...detail,
+      period: { start, end: endDate, label: period || '7d' },
+    });
+  } catch (error) {
+    logger.error('Failed to get project detail', { error: error.message });
+    res.status(500).json({ error: 'Failed to get project detail' });
+  }
+});
+
+/**
+ * GET /api/dashboard/super/endpoint/:endpoint
+ * Get detailed stats for a specific endpoint
+ * Query params: period
+ */
+router.get('/super/endpoint/:endpoint', (req, res) => {
+  try {
+    const { endpoint } = req.params;
+    const { period } = req.query;
+
+    const now = new Date();
+    const endDate = now.toISOString().split('T')[0];
+    const endDateTime = endDate + ' 23:59:59';
+
+    let start;
+    switch (period) {
+      case '1d':
+        start = new Date(now.getTime() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '30d':
+        start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case '90d':
+        start = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+      case 'all':
+        start = '2000-01-01';
+        break;
+      case '7d':
+      default:
+        start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        break;
+    }
+
+    const detail = Request.getEndpointDetail(decodeURIComponent(endpoint), {
+      startDate: start,
+      endDate: endDateTime,
+    });
+
+    res.json({
+      ...detail,
+      period: { start, end: endDate, label: period || '7d' },
+    });
+  } catch (error) {
+    logger.error('Failed to get endpoint detail', { error: error.message });
+    res.status(500).json({ error: 'Failed to get endpoint detail' });
   }
 });
 
@@ -467,6 +621,19 @@ router.get('/super', (req, res) => {
       endDate: endDateTime,
     });
 
+    // Get cache stats
+    const cacheStats = Request.getCacheStats({
+      projectId,
+      startDate: start,
+      endDate: endDateTime,
+    });
+
+    const tokenFlow = Request.getTokenFlow({
+      projectId,
+      startDate: start,
+      endDate: endDateTime,
+    });
+
     // Get total counts for summary cards
     const totalProjects = Project.findAll().length;
     const uniqueModels = dashboardData.byModel.length;
@@ -478,12 +645,100 @@ router.get('/super', (req, res) => {
         ...dashboardData.summary,
         totalProjects,
         totalModels: uniqueModels,
+        // Cache metrics
+        cacheHits: cacheStats.cacheHits || 0,
+        cacheHitRate: cacheStats.cacheHitRate || 0,
+        tokensSent: tokenFlow.tokensSentToUpstream || 0,
+        tokensReceived: tokenFlow.tokensReceivedFromUpstream || 0,
       },
       period: { start, end: endDate, label: period || '7d' },
     });
   } catch (error) {
     logger.error('Failed to get super dashboard data', { error: error.message, stack: error.stack });
     res.status(500).json({ error: 'Failed to get dashboard data' });
+  }
+});
+
+/**
+ * GET /api/dashboard/cache-stats
+ * Get cache statistics
+ */
+router.get('/cache-stats', (req, res) => {
+  try {
+    const { projectId, startDate, endDate } = req.query;
+
+    const cacheStats = Request.getCacheStats({
+      projectId,
+      startDate,
+      endDate,
+    });
+
+    const cacheByModel = Request.getCacheByModel({
+      projectId,
+      startDate,
+      endDate,
+    });
+
+    const tokenFlow = Request.getTokenFlow({
+      projectId,
+      startDate,
+      endDate,
+    });
+
+    res.json({
+      stats: cacheStats,
+      byModel: cacheByModel,
+      tokenFlow,
+    });
+  } catch (error) {
+    logger.error('Failed to get cache stats', { error: error.message });
+    res.status(500).json({ error: 'Failed to get cache statistics' });
+  }
+});
+
+/**
+ * GET /api/dashboard/quantization-blocks
+ * Get cache stats grouped by quantization block
+ */
+router.get('/quantization-blocks', (req, res) => {
+  try {
+    const { projectId, startDate, endDate } = req.query;
+
+    const blocks = Request.getCacheByQuantizationBlock({
+      projectId,
+      startDate,
+      endDate,
+    });
+
+    res.json({
+      data: blocks,
+    });
+  } catch (error) {
+    logger.error('Failed to get quantization blocks', { error: error.message });
+    res.status(500).json({ error: 'Failed to get quantization blocks' });
+  }
+});
+
+/**
+ * GET /api/dashboard/token-flow
+ * Get token flow statistics
+ */
+router.get('/token-flow', (req, res) => {
+  try {
+    const { projectId, startDate, endDate } = req.query;
+
+    const tokenFlow = Request.getTokenFlow({
+      projectId,
+      startDate,
+      endDate,
+    });
+
+    res.json({
+      data: tokenFlow,
+    });
+  } catch (error) {
+    logger.error('Failed to get token flow', { error: error.message });
+    res.status(500).json({ error: 'Failed to get token flow' });
   }
 });
 

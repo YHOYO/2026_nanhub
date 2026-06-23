@@ -50,6 +50,11 @@ const config = {
 
   // Proxy
   proxyTimeout: parseInt(process.env.PROXY_TIMEOUT || '120000', 10),
+
+  // Time Quantization
+  quantizeEnabled: process.env.QUANTIZE_ENABLED !== 'false',
+  quantizeBlockSize: parseInt(process.env.QUANTIZE_BLOCK_SIZE || '4', 10),
+  quantizeDebug: process.env.QUANTIZE_DEBUG === 'true',
 };
 
 export default config;

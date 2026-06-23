@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import ModelDetail from './ModelDetail.jsx';
 import ApiKeyUsage from './ApiKeyUsage.jsx';
+import ProjectDetail from './ProjectDetail.jsx';
+import EndpointDetail from './EndpointDetail.jsx';
 import ModelUsageChart from './charts/ModelUsageChart.jsx';
 import TokenBarChart from './charts/TokenBarChart.jsx';
 import DistributionDonut from './charts/DistributionDonut.jsx';
@@ -251,6 +253,8 @@ const MetricsDashboard = () => {
   const [period, setPeriod] = useState('7d');
   const [selectedModel, setSelectedModel] = useState(null);
   const [selectedApiKey, setSelectedApiKey] = useState(null);
+  const [selectedProject, setSelectedProject] = useState(null);
+  const [selectedEndpoint, setSelectedEndpoint] = useState(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -271,6 +275,34 @@ const MetricsDashboard = () => {
     fetchData();
   }, [fetchData]);
 
+  // Listen for navigation events from child components
+  useEffect(() => {
+    const handleModelNav = (e) => {
+      handleModelClick(e.detail);
+    };
+    const handleApiKeyNav = (e) => {
+      handleApiKeyClick(e.detail);
+    };
+    const handleProjectNav = (e) => {
+      handleProjectClick(e.detail);
+    };
+    const handlePeriodChangeEvent = (e) => {
+      setPeriod(e.detail);
+    };
+
+    window.addEventListener('navigate-to-model', handleModelNav);
+    window.addEventListener('navigate-to-apikey', handleApiKeyNav);
+    window.addEventListener('navigate-to-project', handleProjectNav);
+    window.addEventListener('metrics-period-change', handlePeriodChangeEvent);
+
+    return () => {
+      window.removeEventListener('navigate-to-model', handleModelNav);
+      window.removeEventListener('navigate-to-apikey', handleApiKeyNav);
+      window.removeEventListener('navigate-to-project', handleProjectNav);
+      window.removeEventListener('metrics-period-change', handlePeriodChangeEvent);
+    };
+  }, []);
+
   const handlePeriodChange = (newPeriod) => {
     setPeriod(newPeriod);
   };
@@ -279,16 +311,38 @@ const MetricsDashboard = () => {
   const handleModelClick = (modelName) => {
     setSelectedModel(modelName);
     setSelectedApiKey(null);
+    setSelectedProject(null);
+    setSelectedEndpoint(null);
   };
 
   const handleApiKeyClick = (apiKeyHash) => {
     setSelectedApiKey(apiKeyHash);
     setSelectedModel(null);
+    setSelectedProject(null);
+    setSelectedEndpoint(null);
+  };
+
+  const handleProjectClick = (projectData) => {
+    const projectId = typeof projectData === 'string' ? projectData : projectData.projectId;
+    const projectName = typeof projectData === 'string' ? projectData : projectData.projectName;
+    setSelectedProject({ projectId, projectName });
+    setSelectedModel(null);
+    setSelectedApiKey(null);
+    setSelectedEndpoint(null);
+  };
+
+  const handleEndpointClick = (endpoint) => {
+    setSelectedEndpoint(endpoint);
+    setSelectedModel(null);
+    setSelectedApiKey(null);
+    setSelectedProject(null);
   };
 
   const handleBackToDashboard = () => {
     setSelectedModel(null);
     setSelectedApiKey(null);
+    setSelectedProject(null);
+    setSelectedEndpoint(null);
   };
 
   // If a model is selected, show ModelDetail
@@ -307,6 +361,29 @@ const MetricsDashboard = () => {
     return (
       <ApiKeyUsage
         apiKeyHash={selectedApiKey}
+        period={period}
+        onBack={handleBackToDashboard}
+      />
+    );
+  }
+
+  // If a project is selected, show ProjectDetail
+  if (selectedProject) {
+    return (
+      <ProjectDetail
+        projectId={selectedProject.projectId}
+        projectName={selectedProject.projectName}
+        period={period}
+        onBack={handleBackToDashboard}
+      />
+    );
+  }
+
+  // If an endpoint is selected, show EndpointDetail
+  if (selectedEndpoint) {
+    return (
+      <EndpointDetail
+        endpoint={selectedEndpoint}
         period={period}
         onBack={handleBackToDashboard}
       />
@@ -405,6 +482,29 @@ const MetricsDashboard = () => {
           <div style={styles.kpiValue}>{formatPct(summary.errorRate)}</div>
           <div style={styles.kpiSubtext}>{summary.totalProjects || 0} proyectos</div>
         </div>
+        {/* New Cache KPIs */}
+        <div style={styles.kpiCard}>
+          <div style={styles.kpiIcon}>💾</div>
+          <div style={styles.kpiLabel}>Cache Hit Rate</div>
+          <div style={{ ...styles.kpiValue, color: (summary.cacheHitRate || 0) >= 80 ? '#34d399' : (summary.cacheHitRate || 0) >= 50 ? '#fbbf24' : '#f87171' }}>
+            {formatPct(summary.cacheHitRate || 0)}
+          </div>
+          <div style={styles.kpiSubtext}>
+            {summary.cacheHits || 0} hits de {summary.totalRequests || 0} requests
+          </div>
+        </div>
+        <div style={styles.kpiCard}>
+          <div style={styles.kpiIcon}>📤</div>
+          <div style={styles.kpiLabel}>Tokens Enviados</div>
+          <div style={styles.kpiValue}>{formatNumber(summary.tokensSent || 0)}</div>
+          <div style={styles.kpiSubtext}>al upstream (sanitizado)</div>
+        </div>
+        <div style={styles.kpiCard}>
+          <div style={styles.kpiIcon}>📥</div>
+          <div style={styles.kpiLabel}>Tokens Recibidos</div>
+          <div style={styles.kpiValue}>{formatNumber(summary.tokensReceived || 0)}</div>
+          <div style={styles.kpiSubtext}>del upstream (response)</div>
+        </div>
       </div>
 
       {/* Charts Row 1: Model Usage + Distribution */}
@@ -440,8 +540,8 @@ const MetricsDashboard = () => {
             </thead>
             <tbody>
               {byProject.map((p, i) => (
-                <tr key={p.projectId || i} style={styles.trHover}>
-                  <td style={styles.tdName}>{p.projectName || p.projectId || 'Sin proyecto'}</td>
+                <tr key={p.projectId || i} style={{ ...styles.trHover, cursor: 'pointer' }} onClick={() => handleProjectClick(p.projectId)}>
+                  <td style={{ ...styles.tdName, textDecoration: 'underline', textUnderlineOffset: '3px' }}>{p.projectName || p.projectId || 'Sin proyecto'}</td>
                   <td style={styles.tdRight}>{formatNumber(p.totalRequests)}</td>
                   <td style={styles.tdRight}>{formatNumber(p.totalTokens)}</td>
                   <td style={styles.tdRight}>
@@ -532,8 +632,8 @@ const MetricsDashboard = () => {
             </thead>
             <tbody>
               {byEndpoint.map((e, i) => (
-                <tr key={e.endpoint || i} style={styles.trHover}>
-                  <td style={styles.tdName}>{e.endpoint}</td>
+                <tr key={e.endpoint || i} style={{ ...styles.trHover, cursor: 'pointer' }} onClick={() => handleEndpointClick(e.endpoint)}>
+                  <td style={{ ...styles.tdName, textDecoration: 'underline', textUnderlineOffset: '3px' }}>{e.endpoint}</td>
                   <td style={styles.tdRight}>{formatNumber(e.totalRequests)}</td>
                   <td style={styles.tdRight}>{formatNumber(e.totalTokens)}</td>
                   <td style={styles.tdRight}>
@@ -666,11 +766,11 @@ const MetricsDashboard = () => {
       )}
 
       {/* Legend */}
-      <div style={{ display: 'flex', gap: '16px', marginTop: '16px', fontSize: '12px', color: '#64748b' }}>
+      <div style={{ display: 'flex', gap: '16px', marginTop: '16px', fontSize: '12px', color: '#64748b', flexWrap: 'wrap' }}>
         <span><span style={{ color: '#22d3ee' }}>●</span> Tokens de entrada (prompt)</span>
         <span><span style={{ color: '#a78bfa' }}>●</span> Tokens de salida (completion)</span>
         <span style={{ color: '#475569' }}>|</span>
-        <span>Haz clic en un <span style={{ color: '#22d3ee' }}>modelo</span> o <span style={{ color: '#22d3ee' }}>API KEY</span> para ver el detalle</span>
+        <span>Haz clic en un <span style={{ color: '#22d3ee' }}>modelo</span>, <span style={{ color: '#22d3ee' }}>proyecto</span>, <span style={{ color: '#22d3ee' }}>endpoint</span> o <span style={{ color: '#22d3ee' }}>API KEY</span> para ver el detalle</span>
       </div>
     </div>
   );

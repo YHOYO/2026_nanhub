@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import DailyTrendChart from './charts/DailyTrendChart.jsx';
-import TokenBarChart from './charts/TokenBarChart.jsx';
 
 /**
- * ModelDetail - Detailed view for a specific model
- * Shows: summary KPIs, daily trend, usage by project, usage by API key
+ * ProjectDetail - Detailed view for a specific project
+ * Shows: summary KPIs, daily trend, usage by model, usage by API key, cache/ savings metrics
  */
 
 const styles = {
@@ -44,12 +43,12 @@ const styles = {
     alignItems: 'center',
     gap: '10px',
   },
-  modelBadge: {
+  projectBadge: {
     display: 'inline-block',
     padding: '4px 12px',
     borderRadius: '20px',
-    background: 'rgba(34, 211, 238, 0.15)',
-    color: '#22d3ee',
+    background: 'rgba(52, 211, 153, 0.15)',
+    color: '#34d399',
     fontSize: '14px',
     fontWeight: '600',
   },
@@ -264,7 +263,7 @@ function formatDate(d) {
 
 const BAR_COLORS = ['#22d3ee', '#a78bfa', '#34d399', '#fbbf24', '#f87171', '#fb923c', '#818cf8', '#2dd4bf'];
 
-const ModelDetail = ({ model, period, onBack }) => {
+const ProjectDetail = ({ projectId, projectName, period, onBack }) => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -273,7 +272,7 @@ const ModelDetail = ({ model, period, onBack }) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/dashboard/super/model/${encodeURIComponent(model)}?period=${period}`);
+      const response = await fetch(`/api/dashboard/super/project/${encodeURIComponent(projectId)}?period=${period}`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const json = await response.json();
       setData(json);
@@ -282,13 +281,14 @@ const ModelDetail = ({ model, period, onBack }) => {
     } finally {
       setLoading(false);
     }
-  }, [model, period]);
+  }, [projectId, period]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
   const handlePeriodChange = (newPeriod) => {
+    // Update the parent's period state by dispatching a custom event
     window.dispatchEvent(new CustomEvent('metrics-period-change', { detail: newPeriod }));
   };
 
@@ -296,7 +296,7 @@ const ModelDetail = ({ model, period, onBack }) => {
     return (
       <div style={styles.container}>
         <button style={styles.backBtn} onClick={onBack}>← Volver</button>
-        <div style={styles.loading}>Cargando detalle del modelo...</div>
+        <div style={styles.loading}>Cargando detalle del proyecto...</div>
       </div>
     );
   }
@@ -312,12 +312,12 @@ const ModelDetail = ({ model, period, onBack }) => {
 
   const summary = data?.summary || {};
   const dailyTrend = data?.dailyTrend || [];
-  const byProject = data?.byProject || [];
+  const byModel = data?.byModel || [];
   const byApiKey = data?.byApiKey || [];
   const cacheStats = data?.cacheStats || {};
   const tokenFlow = data?.tokenFlow || {};
 
-  const maxProjectTokens = Math.max(...byProject.map(p => p.tokens || p.totalTokens || 0), 1);
+  const maxModelTokens = Math.max(...byModel.map(m => m.tokens || 0), 1);
   const maxApiKeyTokens = Math.max(...byApiKey.map(k => k.tokens || 0), 1);
 
   return (
@@ -328,12 +328,23 @@ const ModelDetail = ({ model, period, onBack }) => {
       <div style={styles.header}>
         <div>
           <h1 style={styles.title}>
-            Detalle del Modelo
-            <span style={styles.modelBadge}>{model}</span>
+            Detalle del Proyecto
+            <span style={styles.projectBadge}>{projectName || data?.projectName || projectId}</span>
           </h1>
           <p style={styles.subtitle}>
             Datos del {data?.period?.start} al {data?.period?.end}
           </p>
+        </div>
+        <div style={styles.controls}>
+          {['1d', '7d', '30d', '90d', 'all'].map((p) => (
+            <button
+              key={p}
+              style={period === p ? styles.periodBtnActive : styles.periodBtn}
+              onClick={() => handlePeriodChange(p)}
+            >
+              {p === 'all' ? 'Todo' : p}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -347,7 +358,7 @@ const ModelDetail = ({ model, period, onBack }) => {
             <div>
               <div style={{ fontSize: '12px', color: '#6ee7b7', textTransform: 'uppercase', marginBottom: '4px' }}>Cache Hit Rate</div>
               <div style={{ fontSize: '24px', fontWeight: '700', color: '#fff' }}>{formatPct(cacheStats.cacheHitRate)}</div>
-              <div style={{ fontSize: '12px', color: '#6ee7b7' }}>{cacheStats.cacheHits} hits</div>
+              <div style={{ fontSize: '12px', color: '#6ee7b7' }}>{cacheStats.cacheHits} hits de {summary.totalRequests || 0} requests</div>
             </div>
             <div>
               <div style={{ fontSize: '12px', color: '#6ee7b7', textTransform: 'uppercase', marginBottom: '4px' }}>Tokens Ahorrados</div>
@@ -368,7 +379,7 @@ const ModelDetail = ({ model, period, onBack }) => {
         </div>
       )}
 
-      {/* Charts: Daily Trend for this model */}
+      {/* Charts: Daily Trend for this project */}
       <DailyTrendChart dailyTrend={dailyTrend} />
 
       {/* KPI Cards */}
@@ -409,6 +420,100 @@ const ModelDetail = ({ model, period, onBack }) => {
         </div>
       </div>
 
+      {/* By Model */}
+      {byModel.length > 0 && (
+        <div style={styles.section}>
+          <h2 style={styles.sectionTitle}>🤖 Por Modelo</h2>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Modelo</th>
+                <th style={styles.thRight}>Requests</th>
+                <th style={styles.thRight}>Tokens Totales</th>
+                <th style={styles.thRight}>Entrada</th>
+                <th style={styles.thRight}>Salida</th>
+                <th style={styles.thRight}>Tiempo</th>
+                <th style={styles.thRight}>Errores</th>
+                <th style={styles.th}>Uso</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byModel.map((m, i) => (
+                <tr key={m.model || i} style={{ ...styles.trHover, cursor: 'pointer' }} onClick={() => window.dispatchEvent(new CustomEvent('navigate-to-model', { detail: m.model }))}>
+                  <td style={{ ...styles.tdName, textDecoration: 'underline', textUnderlineOffset: '3px' }}>{m.model}</td>
+                  <td style={styles.tdRight}>{formatNumber(m.requests)}</td>
+                  <td style={styles.tdRight}>{formatNumber(m.tokens)}</td>
+                  <td style={styles.tdRight}>
+                    <span style={styles.tokenIn}>{formatNumber(m.tokensPrompt)}</span>
+                  </td>
+                  <td style={styles.tdRight}>
+                    <span style={styles.tokenOut}>{formatNumber(m.tokensCompletion)}</span>
+                  </td>
+                  <td style={styles.tdRight}>{formatMs(m.avgResponseTime)}</td>
+                  <td style={styles.tdRight}>{formatPct(m.errorRate)}</td>
+                  <td style={styles.td}>
+                    <div style={styles.bar}>
+                      <div style={{
+                        ...styles.barFill,
+                        width: `${((m.tokens || 0) / maxModelTokens * 100)}%`,
+                        background: BAR_COLORS[i % BAR_COLORS.length],
+                      }} />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* By API Key */}
+      {byApiKey.length > 0 && (
+        <div style={styles.section}>
+          <h2 style={styles.sectionTitle}>🔑 Por API KEY</h2>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>API KEY</th>
+                <th style={styles.thRight}>Requests</th>
+                <th style={styles.thRight}>Tokens Totales</th>
+                <th style={styles.thRight}>Entrada</th>
+                <th style={styles.thRight}>Salida</th>
+                <th style={styles.thRight}>Tiempo</th>
+                <th style={styles.th}>Uso</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byApiKey.map((k, i) => (
+                <tr key={k.apiKeyHash || i} style={{ ...styles.trHover, cursor: 'pointer' }} onClick={() => window.dispatchEvent(new CustomEvent('navigate-to-apikey', { detail: k.apiKeyHash }))}>
+                  <td style={{ ...styles.tdName, fontFamily: 'monospace', textDecoration: 'underline', textUnderlineOffset: '3px' }} title={k.apiKeyHash}>
+                    {k.keyName || k.apiKeyMasked || 'N/A'}
+                  </td>
+                  <td style={styles.tdRight}>{formatNumber(k.requests)}</td>
+                  <td style={styles.tdRight}>{formatNumber(k.tokens)}</td>
+                  <td style={styles.tdRight}>
+                    <span style={styles.tokenIn}>{formatNumber(k.tokensPrompt)}</span>
+                  </td>
+                  <td style={styles.tdRight}>
+                    <span style={styles.tokenOut}>{formatNumber(k.tokensCompletion)}</span>
+                  </td>
+                  <td style={styles.tdRight}>{formatMs(k.avgResponseTime)}</td>
+                  <td style={styles.td}>
+                    <div style={styles.bar}>
+                      <div style={{
+                        ...styles.barFill,
+                        width: `${((k.tokens || 0) / maxApiKeyTokens * 100)}%`,
+                        background: BAR_COLORS[i % BAR_COLORS.length],
+                      }} />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {/* Daily Trend */}
       {dailyTrend.length > 0 && (
         <div style={styles.section}>
@@ -442,116 +547,24 @@ const ModelDetail = ({ model, period, onBack }) => {
         </div>
       )}
 
-      {/* By Project */}
-      {byProject.length > 0 && (
-        <div style={styles.section}>
-          <h2 style={styles.sectionTitle}>📁 Por Proyecto</h2>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Proyecto</th>
-                <th style={styles.thRight}>Requests</th>
-                <th style={styles.thRight}>Tokens Totales</th>
-                <th style={styles.thRight}>Entrada</th>
-                <th style={styles.thRight}>Salida</th>
-                <th style={styles.thRight}>Tiempo</th>
-                <th style={styles.th}>Uso</th>
-              </tr>
-            </thead>
-            <tbody>
-              {byProject.map((p, i) => (
-                <tr key={p.projectId || i} style={{ ...styles.trHover, cursor: 'pointer' }} onClick={() => window.dispatchEvent(new CustomEvent('navigate-to-project', { detail: { projectId: p.projectId, projectName: p.projectName } }))}>
-                  <td style={{ ...styles.tdName, textDecoration: 'underline', textUnderlineOffset: '3px' }}>{p.projectName || p.projectId || 'Sin proyecto'}</td>
-                  <td style={styles.tdRight}>{formatNumber(p.requests || p.totalRequests)}</td>
-                  <td style={styles.tdRight}>{formatNumber(p.tokens || p.totalTokens)}</td>
-                  <td style={styles.tdRight}>
-                    <span style={styles.tokenIn}>{formatNumber(p.tokensPrompt || p.totalTokens)}</span>
-                  </td>
-                  <td style={styles.tdRight}>
-                    <span style={styles.tokenOut}>{formatNumber(p.tokensCompletion || 0)}</span>
-                  </td>
-                  <td style={styles.tdRight}>{formatMs(p.avgResponseTime)}</td>
-                  <td style={styles.td}>
-                    <div style={styles.bar}>
-                      <div style={{
-                        ...styles.barFill,
-                        width: `${((p.tokens || p.totalTokens || 0) / maxProjectTokens * 100)}%`,
-                        background: BAR_COLORS[i % BAR_COLORS.length],
-                      }} />
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* By API Key */}
-      {byApiKey.length > 0 && (
-        <div style={styles.section}>
-          <h2 style={styles.sectionTitle}>🔑 Por API KEY</h2>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>API KEY</th>
-                <th style={styles.thRight}>Requests</th>
-                <th style={styles.thRight}>Tokens Totales</th>
-                <th style={styles.thRight}>Entrada</th>
-                <th style={styles.thRight}>Salida</th>
-                <th style={styles.thRight}>Tiempo</th>
-                <th style={styles.th}>Uso</th>
-              </tr>
-            </thead>
-            <tbody>
-              {byApiKey.map((k, i) => (
-                <tr key={k.apiKeyHash || i} style={{ ...styles.trHover, cursor: 'pointer' }} onClick={() => window.dispatchEvent(new CustomEvent('navigate-to-apikey', { detail: k.apiKeyHash }))}>
-                  <td style={{ ...styles.tdName, textDecoration: 'underline', textUnderlineOffset: '3px' }} title={k.apiKeyHash}>
-                    {k.keyName || k.apiKeyMasked || 'N/A'}
-                  </td>
-                  <td style={styles.tdRight}>{formatNumber(k.requests)}</td>
-                  <td style={styles.tdRight}>{formatNumber(k.tokens)}</td>
-                  <td style={styles.tdRight}>
-                    <span style={styles.tokenIn}>{formatNumber(k.tokensPrompt)}</span>
-                  </td>
-                  <td style={styles.tdRight}>
-                    <span style={styles.tokenOut}>{formatNumber(k.tokensCompletion)}</span>
-                  </td>
-                  <td style={styles.tdRight}>{formatMs(k.avgResponseTime)}</td>
-                  <td style={styles.td}>
-                    <div style={styles.bar}>
-                      <div style={{
-                        ...styles.barFill,
-                        width: `${((k.tokens || 0) / maxApiKeyTokens * 100)}%`,
-                        background: BAR_COLORS[i % BAR_COLORS.length],
-                      }} />
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
       {/* Empty state */}
-      {byProject.length === 0 && byApiKey.length === 0 && dailyTrend.length === 0 && (
+      {byModel.length === 0 && byApiKey.length === 0 && dailyTrend.length === 0 && (
         <div style={styles.section}>
           <div style={styles.empty}>
-            No hay datos de uso para el modelo <strong>{model}</strong> en este período.
+            No hay datos de uso para el proyecto <strong>{projectName || data?.projectName || projectId}</strong> en este período.
           </div>
         </div>
       )}
 
       {/* Legend */}
-      <div style={{ display: 'flex', gap: '16px', marginTop: '16px', fontSize: '12px', color: '#64748b', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: '16px', marginTop: '16px', fontSize: '12px', color: '#64748b' }}>
         <span><span style={{ color: '#22d3ee' }}>●</span> Tokens de entrada (prompt)</span>
         <span><span style={{ color: '#a78bfa' }}>●</span> Tokens de salida (completion)</span>
         <span style={{ color: '#475569' }}>|</span>
-        <span>Haz clic en un <span style={{ color: '#22d3ee' }}>proyecto</span> o <span style={{ color: '#22d3ee' }}>API KEY</span> para ver el detalle</span>
+        <span>Haz clic en un <span style={{ color: '#22d3ee' }}>modelo</span> o <span style={{ color: '#22d3ee' }}>API KEY</span> para ver el detalle</span>
       </div>
     </div>
   );
 };
 
-export default ModelDetail;
+export default ProjectDetail;

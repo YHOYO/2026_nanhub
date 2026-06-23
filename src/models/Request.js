@@ -47,7 +47,13 @@ const Request = {
         tokens_completion = ?,
         tokens_total = ?,
         model = ?,
-        error_message = ?
+        error_message = ?,
+        tokens_request_sent = ?,
+        tokens_response_received = ?,
+        original_timestamp = ?,
+        quantization_block = ?,
+        cache_hit = ?,
+        cache_hit_confidence = ?
       WHERE id = ?
     `);
 
@@ -60,6 +66,12 @@ const Request = {
       data.tokensTotal || 0,
       data.model || null,
       data.errorMessage || null,
+      data.tokensRequestSent || 0,
+      data.tokensResponseReceived || data.tokensTotal || 0,
+      data.originalTimestamp || null,
+      data.quantizationBlock || null,
+      data.cacheHit || 0,
+      data.cacheHitConfidence || 0,
       id
     );
   },
@@ -618,6 +630,498 @@ const Request = {
     const result = stmt.run(days);
     return result.changes;
   },
+
+  /**
+   * Get cache statistics
+   * Returns: totalRequests, cacheHits, cacheHitRate, totalTokensSent, totalTokensReceived
+   */
+  getCacheStats(filters = {}) {
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+
+    if (filters.projectId) {
+      whereClause += ' AND project_id = ?';
+      params.push(filters.projectId);
+    }
+
+    if (filters.startDate) {
+      whereClause += ' AND timestamp >= ?';
+      params.push(filters.startDate);
+    }
+
+    if (filters.endDate) {
+      whereClause += ' AND timestamp <= ?';
+      params.push(filters.endDate);
+    }
+
+    const stmt = db.prepare(`
+      SELECT
+        COUNT(*) as totalRequests,
+        COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0) as cacheHits,
+        COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0) as cacheHitRate,
+        COALESCE(SUM(tokens_request_sent), 0) as totalTokensSent,
+        COALESCE(SUM(tokens_response_received), 0) as totalTokensReceived,
+        COALESCE(SUM(tokens_prompt), 0) as totalTokensPrompt,
+        COALESCE(SUM(tokens_completion), 0) as totalTokensCompletion,
+        COALESCE(SUM(tokens_request_sent - tokens_response_received), 0) as tokenSavings
+      FROM requests ${whereClause}
+    `);
+
+    return stmt.get(...params);
+  },
+
+  /**
+   * Get cache stats grouped by quantization block
+   * Returns: quantizationBlock, requests, cacheHits, cacheHitRate, tokensSent, tokensReceived
+   */
+  getCacheByQuantizationBlock(filters = {}) {
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+
+    if (filters.projectId) {
+      whereClause += ' AND project_id = ?';
+      params.push(filters.projectId);
+    }
+
+    if (filters.startDate) {
+      whereClause += ' AND timestamp >= ?';
+      params.push(filters.startDate);
+    }
+
+    if (filters.endDate) {
+      whereClause += ' AND timestamp <= ?';
+      params.push(filters.endDate);
+    }
+
+    const stmt = db.prepare(`
+      SELECT
+        quantization_block,
+        COUNT(*) as requests,
+        COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0) as cacheHits,
+        COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 0) as cacheHitRate,
+        COALESCE(SUM(tokens_request_sent), 0) as tokensSent,
+        COALESCE(SUM(tokens_response_received), 0) as tokensReceived,
+        COALESCE(AVG(response_time_ms), 0) as avgResponseTime
+      FROM requests ${whereClause}
+      GROUP BY quantization_block
+      ORDER BY requests DESC
+    `);
+
+    return stmt.all(...params);
+  },
+
+  /**
+   * Get token flow statistics
+   * Returns: tokensSentToUpstream, tokensReceivedFromUpstream, avgTokenDelta
+   */
+  getTokenFlow(filters = {}) {
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+
+    if (filters.projectId) {
+      whereClause += ' AND project_id = ?';
+      params.push(filters.projectId);
+    }
+
+    if (filters.startDate) {
+      whereClause += ' AND timestamp >= ?';
+      params.push(filters.startDate);
+    }
+
+    if (filters.endDate) {
+      whereClause += ' AND timestamp <= ?';
+      params.push(filters.endDate);
+    }
+
+    const stmt = db.prepare(`
+      SELECT
+        COALESCE(SUM(tokens_request_sent), 0) as tokensSentToUpstream,
+        COALESCE(SUM(tokens_response_received), 0) as tokensReceivedFromUpstream,
+        COALESCE(SUM(tokens_prompt), 0) as tokensPromptInResponse,
+        COALESCE(SUM(tokens_completion), 0) as tokensCompletionInResponse,
+        COALESCE(AVG(tokens_request_sent - tokens_response_received), 0) as avgTokenDelta,
+        COUNT(*) as totalRequests
+      FROM requests ${whereClause}
+    `);
+
+    return stmt.get(...params);
+  },
+
+  /**
+   * Get cache hit rate by model
+   * Returns: model, requests, cacheHits, cacheHitRate, avgResponseTime
+   */
+  getCacheByModel(filters = {}) {
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+
+    if (filters.projectId) {
+      whereClause += ' AND project_id = ?';
+      params.push(filters.projectId);
+    }
+
+    if (filters.startDate) {
+      whereClause += ' AND timestamp >= ?';
+      params.push(filters.startDate);
+    }
+
+    if (filters.endDate) {
+      whereClause += ' AND timestamp <= ?';
+      params.push(filters.endDate);
+    }
+
+    const stmt = db.prepare(`
+      SELECT
+        COALESCE(model, 'unknown') as model,
+        COUNT(*) as requests,
+        COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0) as cacheHits,
+        COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 0) as cacheHitRate,
+        COALESCE(AVG(response_time_ms), 0) as avgResponseTime,
+        COALESCE(SUM(tokens_request_sent), 0) as tokensSent,
+        COALESCE(SUM(tokens_response_received), 0) as tokensReceived
+      FROM requests ${whereClause}
+      GROUP BY model
+      ORDER BY requests DESC
+    `);
+
+    return stmt.all(...params);
+  },
+
+/**
+ * Get detailed stats for a specific project ID
+ * Returns: summary, dailyTrend, byModel, byApiKey, cacheStats, tokenFlow
+ */
+getProjectDetail(projectId, filters = {}) {
+  let whereClause = 'WHERE project_id = ?';
+  const params = [projectId];
+
+  if (filters.startDate) {
+    whereClause += ' AND timestamp >= ?';
+    params.push(filters.startDate);
+  }
+
+  if (filters.endDate) {
+    whereClause += ' AND timestamp <= ?';
+    params.push(filters.endDate);
+  }
+
+  // Summary
+  const summaryStmt = db.prepare(`
+    SELECT
+      COUNT(*) as totalRequests,
+      COALESCE(SUM(tokens_total), 0) as totalTokens,
+      COALESCE(SUM(tokens_prompt), 0) as totalPrompt,
+      COALESCE(SUM(tokens_completion), 0) as totalCompletion,
+      COALESCE(AVG(response_time_ms), 0) as avgResponseTime,
+      COALESCE(SUM(CASE WHEN response_status >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 0) as errorRate
+    FROM requests ${whereClause}
+  `);
+  const summary = summaryStmt.get(...params);
+
+  // Daily trend
+  const dailyStmt = db.prepare(`
+    SELECT
+      DATE(timestamp) as date,
+      COUNT(*) as requests,
+      COALESCE(SUM(tokens_total), 0) as tokens,
+      COALESCE(SUM(tokens_prompt), 0) as tokensPrompt,
+      COALESCE(SUM(tokens_completion), 0) as tokensCompletion
+    FROM requests ${whereClause}
+    GROUP BY DATE(timestamp)
+    ORDER BY date ASC
+  `);
+  const dailyTrend = dailyStmt.all(...params);
+
+  // By model
+  const byModelStmt = db.prepare(`
+    SELECT
+      COALESCE(model, 'unknown') as model,
+      COUNT(*) as requests,
+      COALESCE(SUM(tokens_total), 0) as tokens,
+      COALESCE(SUM(tokens_prompt), 0) as tokensPrompt,
+      COALESCE(SUM(tokens_completion), 0) as tokensCompletion,
+      COALESCE(AVG(response_time_ms), 0) as avgResponseTime,
+      COALESCE(SUM(CASE WHEN response_status >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 0) as errorRate
+    FROM requests ${whereClause}
+    GROUP BY model
+    ORDER BY tokens DESC
+  `);
+  const byModel = byModelStmt.all(...params);
+
+  // By API key
+  const byApiKeyStmt = db.prepare(`
+    SELECT
+      api_key_hash,
+      COUNT(*) as requests,
+      COALESCE(SUM(tokens_total), 0) as tokens,
+      COALESCE(SUM(tokens_prompt), 0) as tokensPrompt,
+      COALESCE(SUM(tokens_completion), 0) as tokensCompletion,
+      COALESCE(AVG(response_time_ms), 0) as avgResponseTime,
+      MAX(timestamp) as lastUsed
+    FROM requests ${whereClause}
+    GROUP BY api_key_hash
+    ORDER BY tokens DESC
+  `);
+  const byApiKeyRaw = byApiKeyStmt.all(...params);
+  const keyNameStmt = db.prepare('SELECT name FROM project_api_keys WHERE key_hash = ? LIMIT 1');
+  const byApiKey = byApiKeyRaw.map(row => {
+    let keyInfo = null;
+    try {
+      const hashedToken = hashApiKey(row.api_key_hash);
+      keyInfo = keyNameStmt.get(hashedToken);
+    } catch (e) {
+      // Ignore hash errors
+    }
+    return {
+      apiKeyHash: row.api_key_hash,
+      apiKeyMasked: row.api_key_hash ? '...' + row.api_key_hash.slice(-8) : 'N/A',
+      keyName: keyInfo?.name || null,
+      requests: row.requests,
+      tokens: row.tokens,
+      tokensPrompt: row.tokensPrompt,
+      tokensCompletion: row.tokensCompletion,
+      avgResponseTime: Math.round(row.avgResponseTime || 0),
+      lastUsed: row.lastUsed,
+    };
+  });
+
+  // Cache stats
+  const cacheStatsStmt = db.prepare(`
+    SELECT
+      COUNT(*) as totalRequests,
+      COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0) as cacheHits,
+      COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0) as cacheHitRate,
+      COALESCE(SUM(tokens_request_sent), 0) as tokensSent,
+      COALESCE(SUM(tokens_response_received), 0) as tokensReceived,
+      COALESCE(SUM(tokens_request_sent - tokens_response_received), 0) as tokenSavings
+    FROM requests ${whereClause}
+  `);
+  const cacheStats = cacheStatsStmt.get(...params);
+
+  // Token flow
+  const tokenFlowStmt = db.prepare(`
+    SELECT
+      COALESCE(SUM(tokens_request_sent), 0) as tokensSentToUpstream,
+      COALESCE(SUM(tokens_response_received), 0) as tokensReceivedFromUpstream,
+      COALESCE(AVG(tokens_request_sent - tokens_response_received), 0) as avgTokenDelta,
+      COUNT(*) as totalRequests
+    FROM requests ${whereClause}
+  `);
+  const tokenFlow = tokenFlowStmt.get(...params);
+
+  // Project name
+  const projectStmt = db.prepare('SELECT name FROM projects WHERE id = ?');
+  const project = projectStmt.get(projectId);
+
+  return {
+    summary: {
+      totalRequests: summary.totalRequests || 0,
+      totalTokens: summary.totalTokens || 0,
+      totalPrompt: summary.totalPrompt || 0,
+      totalCompletion: summary.totalCompletion || 0,
+      avgResponseTime: Math.round(summary.avgResponseTime || 0),
+      errorRate: Math.round((summary.errorRate || 0) * 100) / 100,
+    },
+    dailyTrend,
+    byModel,
+    byApiKey,
+    cacheStats: {
+      cacheHits: cacheStats.cacheHits || 0,
+      cacheHitRate: Math.round((cacheStats.cacheHitRate || 0) * 100) / 100,
+      tokenSavings: cacheStats.tokenSavings || 0,
+      tokensSent: cacheStats.tokensSent || 0,
+      tokensReceived: cacheStats.tokensReceived || 0,
+    },
+    tokenFlow: {
+      tokensSentToUpstream: tokenFlow.tokensSentToUpstream || 0,
+      tokensReceivedFromUpstream: tokenFlow.tokensReceivedFromUpstream || 0,
+      avgTokenDelta: Math.round(tokenFlow.avgTokenDelta || 0),
+    },
+    projectName: project?.name || 'Sin proyecto',
+    projectId,
+  };
+},
+
+/**
+ * Get detailed stats for a specific endpoint
+ * Returns: summary, dailyTrend, byModel, byProject, byApiKey, cacheStats, tokenFlow
+ */
+getEndpointDetail(endpoint, filters = {}) {
+  let whereClause = 'WHERE endpoint = ?';
+  const params = [endpoint];
+
+  if (filters.startDate) {
+    whereClause += ' AND timestamp >= ?';
+    params.push(filters.startDate);
+  }
+
+  if (filters.endDate) {
+    whereClause += ' AND timestamp <= ?';
+    params.push(filters.endDate);
+  }
+
+  // Summary
+  const summaryStmt = db.prepare(`
+    SELECT
+      COUNT(*) as totalRequests,
+      COALESCE(SUM(tokens_total), 0) as totalTokens,
+      COALESCE(SUM(tokens_prompt), 0) as totalPrompt,
+      COALESCE(SUM(tokens_completion), 0) as totalCompletion,
+      COALESCE(AVG(response_time_ms), 0) as avgResponseTime,
+      COALESCE(SUM(CASE WHEN response_status >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 0) as errorRate
+    FROM requests ${whereClause}
+  `);
+  const summary = summaryStmt.get(...params);
+
+  // Daily trend
+  const dailyStmt = db.prepare(`
+    SELECT
+      DATE(timestamp) as date,
+      COUNT(*) as requests,
+      COALESCE(SUM(tokens_total), 0) as tokens,
+      COALESCE(SUM(tokens_prompt), 0) as tokensPrompt,
+      COALESCE(SUM(tokens_completion), 0) as tokensCompletion
+    FROM requests ${whereClause}
+    GROUP BY DATE(timestamp)
+    ORDER BY date ASC
+  `);
+  const dailyTrend = dailyStmt.all(...params);
+
+  // By model
+  const byModelStmt = db.prepare(`
+    SELECT
+      COALESCE(model, 'unknown') as model,
+      COUNT(*) as requests,
+      COALESCE(SUM(tokens_total), 0) as tokens,
+      COALESCE(SUM(tokens_prompt), 0) as tokensPrompt,
+      COALESCE(SUM(tokens_completion), 0) as tokensCompletion,
+      COALESCE(AVG(response_time_ms), 0) as avgResponseTime,
+      COALESCE(SUM(CASE WHEN response_status >= 400 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 0) as errorRate
+    FROM requests ${whereClause}
+    GROUP BY model
+    ORDER BY tokens DESC
+  `);
+  const byModel = byModelStmt.all(...params);
+
+  // By project
+  const byProjectStmt = db.prepare(`
+    SELECT
+      project_id,
+      COUNT(*) as requests,
+      COALESCE(SUM(tokens_total), 0) as tokens,
+      COALESCE(SUM(tokens_prompt), 0) as tokensPrompt,
+      COALESCE(SUM(tokens_completion), 0) as tokensCompletion,
+      COALESCE(AVG(response_time_ms), 0) as avgResponseTime
+    FROM requests ${whereClause}
+    GROUP BY project_id
+    ORDER BY tokens DESC
+  `);
+  const byProjectRaw = byProjectStmt.all(...params);
+  const projectLookupStmt = db.prepare('SELECT id, name FROM projects WHERE id = ?');
+  const byProject = byProjectRaw.map(row => {
+    const p = projectLookupStmt.get(row.project_id);
+    return {
+      projectId: row.project_id,
+      projectName: p?.name || 'Sin proyecto',
+      requests: row.requests,
+      tokens: row.tokens,
+      tokensPrompt: row.tokensPrompt,
+      tokensCompletion: row.tokensCompletion,
+      avgResponseTime: Math.round(row.avgResponseTime || 0),
+    };
+  });
+
+  // By API key
+  const byApiKeyStmt = db.prepare(`
+    SELECT
+      api_key_hash,
+      project_id,
+      COUNT(*) as requests,
+      COALESCE(SUM(tokens_total), 0) as tokens,
+      COALESCE(SUM(tokens_prompt), 0) as tokensPrompt,
+      COALESCE(SUM(tokens_completion), 0) as tokensCompletion,
+      COALESCE(AVG(response_time_ms), 0) as avgResponseTime,
+      MAX(timestamp) as lastUsed
+    FROM requests ${whereClause}
+    GROUP BY api_key_hash
+    ORDER BY tokens DESC
+  `);
+  const byApiKeyRaw = byApiKeyStmt.all(...params);
+  const keyNameStmt = db.prepare('SELECT name FROM project_api_keys WHERE key_hash = ? LIMIT 1');
+  const byApiKey = byApiKeyRaw.map(row => {
+    let keyInfo = null;
+    try {
+      const hashedToken = hashApiKey(row.api_key_hash);
+      keyInfo = keyNameStmt.get(hashedToken);
+    } catch (e) {
+      // Ignore hash errors
+    }
+    return {
+      apiKeyHash: row.api_key_hash,
+      apiKeyMasked: row.api_key_hash ? '...' + row.api_key_hash.slice(-8) : 'N/A',
+      keyName: keyInfo?.name || null,
+      projectId: row.project_id,
+      requests: row.requests,
+      tokens: row.tokens,
+      tokensPrompt: row.tokensPrompt,
+      tokensCompletion: row.tokensCompletion,
+      avgResponseTime: Math.round(row.avgResponseTime || 0),
+      lastUsed: row.lastUsed,
+    };
+  });
+
+  // Cache stats
+  const cacheStatsStmt = db.prepare(`
+    SELECT
+      COUNT(*) as totalRequests,
+      COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0) as cacheHits,
+      COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 0) as cacheHitRate,
+      COALESCE(SUM(tokens_request_sent), 0) as tokensSent,
+      COALESCE(SUM(tokens_response_received), 0) as tokensReceived,
+      COALESCE(SUM(tokens_request_sent - tokens_response_received), 0) as tokenSavings
+    FROM requests ${whereClause}
+  `);
+  const cacheStats = cacheStatsStmt.get(...params);
+
+  // Token flow
+  const tokenFlowStmt = db.prepare(`
+    SELECT
+      COALESCE(SUM(tokens_request_sent), 0) as tokensSentToUpstream,
+      COALESCE(SUM(tokens_response_received), 0) as tokensReceivedFromUpstream,
+      COALESCE(AVG(tokens_request_sent - tokens_response_received), 0) as avgTokenDelta,
+      COUNT(*) as totalRequests
+    FROM requests ${whereClause}
+  `);
+  const tokenFlow = tokenFlowStmt.get(...params);
+
+  return {
+    summary: {
+      totalRequests: summary.totalRequests || 0,
+      totalTokens: summary.totalTokens || 0,
+      totalPrompt: summary.totalPrompt || 0,
+      totalCompletion: summary.totalCompletion || 0,
+      avgResponseTime: Math.round(summary.avgResponseTime || 0),
+      errorRate: Math.round((summary.errorRate || 0) * 100) / 100,
+    },
+    dailyTrend,
+    byModel,
+    byProject,
+    byApiKey,
+    cacheStats: {
+      cacheHits: cacheStats.cacheHits || 0,
+      cacheHitRate: Math.round((cacheStats.cacheHitRate || 0) * 100) / 100,
+      tokenSavings: cacheStats.tokenSavings || 0,
+      tokensSent: cacheStats.tokensSent || 0,
+      tokensReceived: cacheStats.tokensReceived || 0,
+    },
+    tokenFlow: {
+      tokensSentToUpstream: tokenFlow.tokensSentToUpstream || 0,
+      tokensReceivedFromUpstream: tokenFlow.tokensReceivedFromUpstream || 0,
+      avgTokenDelta: Math.round(tokenFlow.avgTokenDelta || 0),
+    },
+    endpoint,
+  };
+},
 };
 
 export default Request;

@@ -152,6 +152,7 @@ const styles = {
     color: '#22d3ee',
     fontSize: '14px',
     fontWeight: '500',
+    cursor: 'pointer',
   },
   trHover: {
     transition: 'background 0.15s',
@@ -200,6 +201,13 @@ const styles = {
     gap: '12px',
     background: '#1e293b',
     border: '1px solid #334155',
+    borderRadius: '12px',
+    padding: '20px',
+    marginBottom: '32px',
+  },
+  savingsCard: {
+    background: 'linear-gradient(135deg, #065f46 0%, #064e3b 100%)',
+    border: '1px solid #10b981',
     borderRadius: '12px',
     padding: '20px',
     marginBottom: '32px',
@@ -293,6 +301,8 @@ const ApiKeyUsage = ({ apiKeyHash, period, onBack }) => {
   const dailyTrend = data?.dailyTrend || [];
   const byModel = data?.byModel || [];
   const projects = data?.projects || [];
+  const cacheStats = data?.cacheStats || {};
+  const tokenFlow = data?.tokenFlow || {};
   const keyName = data?.keyName || 'Sin nombre';
   const apiKeyMasked = data?.apiKeyMasked || apiKeyHash?.slice(-8) || 'N/A';
 
@@ -335,6 +345,37 @@ const ApiKeyUsage = ({ apiKeyHash, period, onBack }) => {
         </div>
       </div>
 
+      {/* Savings Card - Cache & Token Flow */}
+      {(cacheStats.cacheHits > 0 || tokenFlow.tokensSentToUpstream > 0) && (
+        <div style={styles.savingsCard}>
+          <h3 style={{ fontSize: '16px', fontWeight: '600', color: '#34d399', marginBottom: '16px' }}>
+            💰 Métricas de Ahorro y Cache
+          </h3>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
+            <div>
+              <div style={{ fontSize: '12px', color: '#6ee7b7', textTransform: 'uppercase', marginBottom: '4px' }}>Cache Hit Rate</div>
+              <div style={{ fontSize: '24px', fontWeight: '700', color: '#fff' }}>{formatPct(cacheStats.cacheHitRate)}</div>
+              <div style={{ fontSize: '12px', color: '#6ee7b7' }}>{cacheStats.cacheHits} hits</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '12px', color: '#6ee7b7', textTransform: 'uppercase', marginBottom: '4px' }}>Tokens Ahorrados</div>
+              <div style={{ fontSize: '24px', fontWeight: '700', color: '#fff' }}>{formatNumber(cacheStats.tokenSavings)}</div>
+              <div style={{ fontSize: '12px', color: '#6ee7b7' }}>tokens request - response</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '12px', color: '#6ee7b7', textTransform: 'uppercase', marginBottom: '4px' }}>Tokens Enviados</div>
+              <div style={{ fontSize: '24px', fontWeight: '700', color: '#fff' }}>{formatNumber(tokenFlow.tokensSentToUpstream)}</div>
+              <div style={{ fontSize: '12px', color: '#6ee7b7' }}>al upstream</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '12px', color: '#6ee7b7', textTransform: 'uppercase', marginBottom: '4px' }}>Tokens Recibidos</div>
+              <div style={{ fontSize: '24px', fontWeight: '700', color: '#fff' }}>{formatNumber(tokenFlow.tokensReceivedFromUpstream)}</div>
+              <div style={{ fontSize: '12px', color: '#6ee7b7' }}>del upstream</div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Charts: Daily Trend for this API key */}
       <DailyTrendChart dailyTrend={dailyTrend} />
 
@@ -366,6 +407,14 @@ const ApiKeyUsage = ({ apiKeyHash, period, onBack }) => {
           <div style={styles.kpiLabel}>Tasa Errores</div>
           <div style={styles.kpiValue}>{formatPct(summary.errorRate)}</div>
         </div>
+        <div style={styles.kpiCard}>
+          <div style={styles.kpiIcon}>💾</div>
+          <div style={styles.kpiLabel}>Cache Hit Rate</div>
+          <div style={{ ...styles.kpiValue, color: (cacheStats.cacheHitRate || 0) >= 80 ? '#34d399' : (cacheStats.cacheHitRate || 0) >= 50 ? '#fbbf24' : '#f87171' }}>
+            {formatPct(cacheStats.cacheHitRate)}
+          </div>
+          <div style={styles.kpiSubtext}>{cacheStats.cacheHits} hits</div>
+        </div>
       </div>
 
       {/* By Model */}
@@ -387,8 +436,8 @@ const ApiKeyUsage = ({ apiKeyHash, period, onBack }) => {
             </thead>
             <tbody>
               {byModel.map((m, i) => (
-                <tr key={m.model || i} style={styles.trHover}>
-                  <td style={styles.tdName}>{m.model}</td>
+                <tr key={m.model || i} style={{ ...styles.trHover, cursor: 'pointer' }} onClick={() => window.dispatchEvent(new CustomEvent('navigate-to-model', { detail: m.model }))}>
+                  <td style={{ ...styles.tdName, textDecoration: 'underline', textUnderlineOffset: '3px' }}>{m.model}</td>
                   <td style={styles.tdRight}>{formatNumber(m.requests)}</td>
                   <td style={styles.tdRight}>{formatNumber(m.tokens)}</td>
                   <td style={styles.tdRight}>
@@ -458,9 +507,11 @@ const ApiKeyUsage = ({ apiKeyHash, period, onBack }) => {
       )}
 
       {/* Legend */}
-      <div style={{ display: 'flex', gap: '16px', marginTop: '16px', fontSize: '12px', color: '#64748b' }}>
+      <div style={{ display: 'flex', gap: '16px', marginTop: '16px', fontSize: '12px', color: '#64748b', flexWrap: 'wrap' }}>
         <span><span style={{ color: '#22d3ee' }}>●</span> Tokens de entrada (prompt)</span>
         <span><span style={{ color: '#a78bfa' }}>●</span> Tokens de salida (completion)</span>
+        <span style={{ color: '#475569' }}>|</span>
+        <span>Haz clic en un <span style={{ color: '#22d3ee' }}>modelo</span> para ver el detalle</span>
       </div>
     </div>
   );

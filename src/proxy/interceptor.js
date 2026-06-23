@@ -1,14 +1,18 @@
 import crypto from 'crypto';
 import Request from '../models/Request.js';
 import Metric from '../models/Metric.js';
+import timeQuantizer from './timeQuantizer.js';
 import logger from '../utils/logger.js';
 
 /**
  * Request Interceptor - captures and stores all API request data
+ * Enhanced with cache metrics and token flow tracking
  */
 class RequestInterceptor {
   constructor() {
     this.pendingRequests = new Map();
+    // Track response times per endpoint for cache hit detection
+    this.endpointResponseTimes = new Map();
   }
 
   /**
@@ -28,6 +32,7 @@ class RequestInterceptor {
       requestBody: req.body || null,
       projectId: req.projectId || null,
       startTime,
+      req, // Keep reference to request for metadata access
     };
 
     this.pendingRequests.set(requestId, captureData);
@@ -56,6 +61,7 @@ class RequestInterceptor {
 
   /**
    * Complete request capture with response data
+   * Enhanced with cache metrics and token flow tracking
    */
   completeCapture(requestId, responseData) {
     const captureData = this.pendingRequests.get(requestId);
@@ -75,8 +81,8 @@ class RequestInterceptor {
 
     if (responseData.body) {
       try {
-        const body = typeof responseData.body === 'string' 
-          ? JSON.parse(responseData.body) 
+        const body = typeof responseData.body === 'string'
+          ? JSON.parse(responseData.body)
           : responseData.body;
 
         if (body.usage) {
@@ -93,6 +99,18 @@ class RequestInterceptor {
       }
     }
 
+    // Extract cache/quantization metadata from request
+    const quantizationMetadata = captureData.req?.quantizationMetadata || null;
+    const quantizationBlock = quantizationMetadata?.quantizationBlock || null;
+    const originalTimestamp = quantizationMetadata?.originalTimestamp || null;
+    const tokensRequestSent = quantizationMetadata?.tokensAfter || 0;
+    const tokensResponseReceived = tokensTotal;
+
+    // Detect cache hit based on response time
+    const cacheDetection = this._detectCacheHit(captureData.endpoint, responseTimeMs);
+    const cacheHit = cacheDetection.hit ? 1 : 0;
+    const cacheHitConfidence = cacheDetection.confidence || 0;
+
     // Update request in database
     Request.updateResponse(captureData.dbId, {
       responseStatus: responseData.status,
@@ -103,6 +121,13 @@ class RequestInterceptor {
       tokensTotal,
       model,
       errorMessage: responseData.error || null,
+      // Cache metrics
+      tokensRequestSent,
+      tokensResponseReceived,
+      originalTimestamp,
+      quantizationBlock,
+      cacheHit,
+      cacheHitConfidence,
     });
 
     // Update daily metrics in real-time
@@ -118,6 +143,9 @@ class RequestInterceptor {
         tokensCompletion,
         avgResponseTimeMs: responseTimeMs,
         errorRate: responseData.status >= 400 ? 100 : 0,
+        // Cache metrics
+        cacheHit,
+        cacheHitConfidence,
       });
     } catch (metricError) {
       logger.error('Failed to upsert metric', { error: metricError.message });
@@ -132,6 +160,9 @@ class RequestInterceptor {
       responseTimeMs,
       tokensTotal,
       model,
+      quantizationBlock,
+      cacheHit: cacheDetection.hit,
+      cacheConfidence: cacheDetection.confidence,
     });
 
     return {
@@ -139,11 +170,56 @@ class RequestInterceptor {
       responseTimeMs,
       tokensTotal,
       model,
+      quantizationBlock,
+      cacheHit: cacheDetection.hit,
     };
   }
 
   /**
+   * Detect cache hit based on response time comparison
+   * @param {string} endpoint - The API endpoint
+   * @param {number} responseTimeMs - Current response time
+   * @returns {object} Detection result
+   */
+  _detectCacheHit(endpoint, responseTimeMs) {
+    // Track response times per endpoint
+    if (!this.endpointResponseTimes.has(endpoint)) {
+      this.endpointResponseTimes.set(endpoint, []);
+    }
+    
+    const times = this.endpointResponseTimes.get(endpoint);
+    times.push(responseTimeMs);
+    
+    // Keep only last 20 responses for averaging
+    if (times.length > 20) {
+      times.shift();
+    }
+    
+    // Need at least 3 responses for reliable detection
+    if (times.length < 3) {
+      return { hit: false, confidence: 0, reason: 'insufficient_data' };
+    }
+    
+    const avgTime = times.reduce((a, b) => a + b, 0) / times.length;
+    
+    // If current response is < 50% of average, likely cache hit
+    if (avgTime > 0) {
+      const ratio = responseTimeMs / avgTime;
+      if (ratio < 0.3) {
+        return { hit: true, confidence: 0.95, reason: 'very_fast' };
+      } else if (ratio < 0.5) {
+        return { hit: true, confidence: 0.8, reason: 'fast' };
+      } else if (ratio < 0.7) {
+        return { hit: true, confidence: 0.5, reason: 'moderate' };
+      }
+    }
+    
+    return { hit: false, confidence: 0, reason: 'normal' };
+  }
+
+  /**
    * Handle streaming response (for SSE)
+   * Enhanced with cache metrics and token flow tracking
    */
   handleStreamingResponse(requestId, chunks) {
     const captureData = this.pendingRequests.get(requestId);
@@ -183,6 +259,17 @@ class RequestInterceptor {
 
     const responseTimeMs = Date.now() - captureData.startTime;
 
+    // Extract cache/quantization metadata from request
+    const quantizationMetadata = captureData.req?.quantizationMetadata || null;
+    const quantizationBlock = quantizationMetadata?.quantizationBlock || null;
+    const originalTimestamp = quantizationMetadata?.originalTimestamp || null;
+    const tokensRequestSent = quantizationMetadata?.tokensAfter || 0;
+
+    // Detect cache hit based on response time
+    const cacheDetection = this._detectCacheHit(captureData.endpoint, responseTimeMs);
+    const cacheHit = cacheDetection.hit ? 1 : 0;
+    const cacheHitConfidence = cacheDetection.confidence || 0;
+
     // Update request in database
     Request.updateResponse(captureData.dbId, {
       responseStatus: 200,
@@ -193,6 +280,13 @@ class RequestInterceptor {
       tokensTotal,
       model,
       errorMessage: null,
+      // Cache metrics
+      tokensRequestSent,
+      tokensResponseReceived: tokensTotal,
+      originalTimestamp,
+      quantizationBlock,
+      cacheHit,
+      cacheHitConfidence,
     });
 
     // Update daily metrics in real-time
@@ -208,6 +302,9 @@ class RequestInterceptor {
         tokensCompletion,
         avgResponseTimeMs: responseTimeMs,
         errorRate: 0, // Streaming responses are typically successful
+        // Cache metrics
+        cacheHit,
+        cacheHitConfidence,
       });
     } catch (metricError) {
       logger.error('Failed to upsert streaming metric', { error: metricError.message });
@@ -221,6 +318,8 @@ class RequestInterceptor {
       responseTimeMs,
       tokensTotal,
       model,
+      quantizationBlock,
+      cacheHit: cacheDetection.hit,
     });
 
     return {
@@ -228,6 +327,8 @@ class RequestInterceptor {
       responseTimeMs,
       tokensTotal,
       model,
+      quantizationBlock,
+      cacheHit: cacheDetection.hit,
     };
   }
 

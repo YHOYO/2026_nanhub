@@ -177,6 +177,9 @@ export function initializeDatabase() {
   // NaN Cloud sync state table
   createSyncStateTable();
 
+  // Cache metrics migration
+  migrateCacheMetrics();
+
   console.log('[Database] Schema initialized successfully');
 }
 
@@ -447,5 +450,84 @@ function migrateImageGenerationsNanRequestId() {
     console.error('[Migration] Error migrating image_generations nan_request_id:', error.message);
   }
 }
+
+/**
+ * Migration: add cache metrics columns to requests table
+ * Stores quantization block, cache hit info, and token flow data
+ */
+function migrateCacheMetrics() {
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(requests)").all();
+    const existingColumns = tableInfo.map(col => col.name);
+
+    const newColumns = [
+      { name: 'tokens_request_sent', definition: 'INTEGER DEFAULT 0' },
+      { name: 'tokens_response_received', definition: 'INTEGER DEFAULT 0' },
+      { name: 'original_timestamp', definition: 'TEXT' },
+      { name: 'quantization_block', definition: 'TEXT' },
+      { name: 'cache_hit', definition: 'INTEGER DEFAULT 0' },
+      { name: 'cache_hit_confidence', definition: 'REAL DEFAULT 0' },
+    ];
+
+    let added = 0;
+    for (const col of newColumns) {
+      if (!existingColumns.includes(col.name)) {
+        db.exec(`ALTER TABLE requests ADD COLUMN ${col.name} ${col.definition}`);
+        added++;
+        console.log(`[Migration] Added requests.${col.name}`);
+      }
+    }
+
+    if (added > 0) {
+      console.log(`[Migration] Added ${added} cache metrics columns to requests`);
+    } else {
+      console.log('[Migration] Cache metrics columns already exist');
+    }
+
+    // Create indexes for cache queries
+    db.exec("CREATE INDEX IF NOT EXISTS idx_requests_quantization_block ON requests(quantization_block)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_requests_cache_hit ON requests(cache_hit)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_requests_original_timestamp ON requests(original_timestamp)");
+    
+    console.log('[Migration] Cache metrics indexes ready');
+  } catch (error) {
+    console.error('[Migration] Error migrating cache metrics:', error.message);
+  }
+}
+
+/**
+ * Migration: add cache columns to metrics_daily table
+ */
+function migrateMetricsDailyCache() {
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(metrics_daily)").all();
+    const existingColumns = tableInfo.map(col => col.name);
+
+    const newColumns = [
+      { name: 'cache_hits', definition: 'INTEGER DEFAULT 0' },
+      { name: 'cache_hit_rate', definition: 'REAL DEFAULT 0' },
+    ];
+
+    let added = 0;
+    for (const col of newColumns) {
+      if (!existingColumns.includes(col.name)) {
+        db.exec(`ALTER TABLE metrics_daily ADD COLUMN ${col.name} ${col.definition}`);
+        added++;
+        console.log(`[Migration] Added metrics_daily.${col.name}`);
+      }
+    }
+
+    if (added > 0) {
+      console.log(`[Migration] Added ${added} cache columns to metrics_daily`);
+    } else {
+      console.log('[Migration] Cache columns in metrics_daily already exist');
+    }
+  } catch (error) {
+    console.error('[Migration] Error migrating metrics_daily cache columns:', error.message);
+  }
+}
+
+// Call this migration after migrateCacheMetrics
+migrateMetricsDailyCache();
 
 export default db;

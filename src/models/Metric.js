@@ -16,15 +16,17 @@ const Metric = {
   upsert(data) {
     const id = generateId();
     const stmt = db.prepare(`
-      INSERT INTO metrics_daily (id, date, project_id, model, endpoint, total_requests, total_tokens, tokens_prompt, tokens_completion, avg_response_time_ms, error_rate)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO metrics_daily (id, date, project_id, model, endpoint, total_requests, total_tokens, tokens_prompt, tokens_completion, avg_response_time_ms, error_rate, cache_hits, cache_hit_rate)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(date, project_id, model, endpoint) DO UPDATE SET
         total_requests = total_requests + excluded.total_requests,
         total_tokens = total_tokens + excluded.total_tokens,
         tokens_prompt = tokens_prompt + excluded.tokens_prompt,
         tokens_completion = tokens_completion + excluded.tokens_completion,
         avg_response_time_ms = (avg_response_time_ms + excluded.avg_response_time_ms) / 2,
-        error_rate = excluded.error_rate
+        error_rate = excluded.error_rate,
+        cache_hits = cache_hits + excluded.cache_hits,
+        cache_hit_rate = excluded.cache_hit_rate
     `);
 
     stmt.run(
@@ -38,7 +40,9 @@ const Metric = {
       data.tokensPrompt || 0,
       data.tokensCompletion || 0,
       data.avgResponseTimeMs || 0,
-      data.errorRate || 0
+      data.errorRate || 0,
+      data.cacheHit || 0,
+      data.cacheHitConfidence || 0
     );
   },
 
